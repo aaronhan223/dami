@@ -1,0 +1,81 @@
+// Temporal RUS-Guided MoE Architecture for Multimodal EHR
+digraph {
+	fontsize=10 rankdir=TB
+	A [label="Multimodal EHR Data" color=lightblue shape=box style=filled]
+	B1 [label="Vital Signs" shape=box]
+	B2 [label="Clinical Notes" shape=box]
+	B3 [label="Medical Imaging" shape=box]
+	B4 [label=ECG shape=box]
+	A -> B1
+	A -> B2
+	A -> B3
+	A -> B4
+	C1 [label="Encoder: CNN/RNN
+(Time-Series)" shape=box]
+	C2 [label="Encoder: Transformer/LSTM
+(Text)" shape=box]
+	C3 [label="Encoder: CNN/ViT
+(Imaging)" shape=box]
+	C4 [label="Encoder: 1D-CNN/Recurrent
+(ECG)" shape=box]
+	B1 -> C1
+	B2 -> C2
+	B3 -> C3
+	B4 -> C4
+	D [label="Fused Representations
+per Time Step" color=lightyellow shape=box style=filled]
+	C1 -> D
+	C2 -> D
+	C3 -> D
+	C4 -> D
+	E [label="RUS Estimation
+Module" color=lightgrey shape=box style=filled]
+	F [label="(R, U, S) Scores
+(Redundancy,
+Uniqueness, Synergy)" color=lightgrey shape=box style=filled]
+	D -> E
+	E -> F
+	G [label="RUS-Guided Gating
+Module" color=orange shape=box style=filled]
+	D -> G
+	F -> G
+	H [label="Top-K Expert
+Selection (Sparse Routing)" color=palegreen shape=box style=filled]
+	G -> H
+	I1 [label="Redundancy Experts" shape=box]
+	I2 [label="Uniqueness Experts" shape=box]
+	I3 [label="Synergy Experts" shape=box]
+	I4 [label="Universal Experts" shape=box]
+	H -> I1
+	H -> I2
+	H -> I3
+	H -> I4
+	J [label="Expert Output
+Aggregation
+(Weighted Fusion)" color=lightpink shape=box style=filled]
+	I1 -> J
+	I2 -> J
+	I3 -> J
+	I4 -> J
+	K [label="Temporal Integration Module
+(Cross-Time Attention,
+Recurrent Fusion)" color=wheat shape=box style=filled]
+	J -> K
+	L [label="Prediction Head" color=lightblue shape=box style=filled]
+	K -> L
+	M [label="Output Prediction
+(Diagnosis/Outcome)" color=lightblue shape=box style=filled]
+	L -> M
+	N [label="Main Task Loss
+(Cross-Entropy/MSE)" color=grey shape=note]
+	M -> N [style=dashed]
+	O [label="Auxiliary Losses
+(Uniqueness, Redundancy, Synergy)" color=grey shape=note]
+	G -> O [style=dashed]
+	P [label="Temporal Consistency Loss" color=grey shape=note]
+	K -> P [style=dashed]
+	Q [label="Batch Priority Routing
+(Optional)" color=darkgreen shape=box style=dotted]
+	G -> Q [style=dotted]
+	Q -> H [style=dotted]
+}
