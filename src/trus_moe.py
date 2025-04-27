@@ -5,7 +5,6 @@ import math
 import random
 from typing import Dict, Tuple, List, Optional
 import numpy as np # Needed for finfo if adapting combine's log/exp space
-import pdb
 
 # --- Helper Functions ---
 
@@ -67,12 +66,85 @@ class FeedForwardExpert(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Input x: (N_for_expert, E_in)
         return self.net(x)
 
-class SynergyExpert(FeedForwardExpert):
-    """Placeholder for a Synergy Expert."""
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, dropout_rate: float = 0.1):
-        super().__init__(input_dim, hidden_dim, output_dim, dropout_rate)
+
+class SynergyExpert(nn.Module):
+    """
+    An expert designed to handle synergistic interactions.
+    It uses self-attention to model interactions among the tokens
+    routed to it within its specific mini-batch.
+    """
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, nhead: int = 4, dropout_rate: float = 0.1):
+        super().__init__()
+        assert input_dim == output_dim, "SynergyExpert currently requires input_dim == output_dim for residual connection"
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+
+        # Self-attention layer to model interactions within the expert's batch
+        self.self_attn = nn.MultiheadAttention(embed_dim=input_dim, num_heads=nhead, dropout=dropout_rate, batch_first=True)
+        self.norm1 = nn.LayerNorm(input_dim)
+        self.dropout1 = nn.Dropout(dropout_rate)
+
+        # Feed-forward layers after attention
+        self.ffn = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim, output_dim)
+        )
+        self.norm2 = nn.LayerNorm(output_dim)
+        self.dropout2 = nn.Dropout(dropout_rate)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for the SynergyExpert.
+
+        Args:
+            x (torch.Tensor): Input tensor for this expert's mini-batch.
+                              Shape (N_for_expert, E_in), where N_for_expert
+                              is the number of tokens routed to this instance.
+
+        Returns:
+            torch.Tensor: Output tensor. Shape (N_for_expert, E_out)
+        """
+        # 1. Self-Attention among tokens routed to this expert
+        # MultiheadAttention expects (Batch, SeqLen, EmbedDim) or (SeqLen, Batch, EmbedDim)
+        # Here, N_for_expert acts as the batch dimension for the attention layer.
+        # We treat the sequence length as 1 for self-attention on individual tokens,
+        # but allow interaction via the attention mechanism itself.
+        # Let's reshape slightly if needed or use it directly if batch_first=True
+        # Input x shape is (N_for_expert, E_in)
+
+        # If N_for_expert is 1, skip attention
+        if x.size(0) <= 1:
+             attn_output = x # No interaction possible
+        else:
+            # Self-attention: Query, Key, Value are all derived from x
+            # For batch_first=True, input shape is (N, L, E) -> (N_for_expert, 1, E_in)
+            # We want attention across the N_for_expert dimension. Let's treat it as SeqLen.
+            # Input shape needs to be (L, N, E) if batch_first=False (default)
+            # or (N, L, E) if batch_first=True.
+            # Let N=1 (batch size for MHA), L=N_for_expert (sequence length)
+            x_attn_input = x.unsqueeze(0) # Shape (1, N_for_expert, E_in)
+            attn_output, _ = self.self_attn(x_attn_input, x_attn_input, x_attn_input, need_weights=False)
+            # Output shape (1, N_for_expert, E_in)
+            attn_output = attn_output.squeeze(0) # Back to (N_for_expert, E_in)
+
+
+        # 2. Add & Norm (Residual connection)
+        x = x + self.dropout1(attn_output)
+        x = self.norm1(x)
+
+        # 3. Feed-Forward Network
+        ffn_output = self.ffn(x)
+
+        # 4. Add & Norm (Residual connection)
+        x = x + self.dropout2(ffn_output) # Residual connection assumes input_dim == output_dim
+        x = self.norm2(x)
+
+        return x
 
 
 # --- Router Implementation ---
@@ -211,11 +283,13 @@ class TemporalRUSMoELayer(nn.Module):
                  num_synergy_experts: int, # How many of the experts are designated synergy experts
                  k: int, # Number of experts to route each token to
                  expert_hidden_dim: int,
+                 synergy_expert_nhead: int, # Num heads for SynergyExpert attention
                  router_config: Dict): # Config for RUSAwareGatingNetworkWithAttention
         super().__init__()
         assert num_experts > 0
         assert 0 < k <= num_experts
         assert 0 <= num_synergy_experts <= num_experts
+        assert input_dim == output_dim, "MoE Layer requires input_dim == output_dim for residual connections in SynergyExpert"
 
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -225,8 +299,11 @@ class TemporalRUSMoELayer(nn.Module):
 
         # Instantiate Experts
         self.experts = nn.ModuleList()
+        # Synergy experts first (if any)
         for _ in range(num_synergy_experts):
-            self.experts.append(SynergyExpert(input_dim, expert_hidden_dim, output_dim))
+             # Pass attention heads config to SynergyExpert
+            self.experts.append(SynergyExpert(input_dim, expert_hidden_dim, output_dim, nhead=synergy_expert_nhead))
+        # Standard experts
         for _ in range(num_experts - num_synergy_experts):
             self.experts.append(FeedForwardExpert(input_dim, expert_hidden_dim, output_dim))
 
@@ -263,11 +340,9 @@ class TemporalRUSMoELayer(nn.Module):
         num_tokens = B * S # Total number of tokens in the flattened sequence
 
         # --- Reshape input for Router ---
-        # Router expects (B, M, T, E_in) to correlate with RUS values
         x_unflattened = x.view(B, M, T, E_in)
 
         # 1. Get routing logits from RUS-aware router
-        # Pass M and T explicitly
         router_logits = self.router(x_unflattened, rus_values, M, T) # Shape (B, M, T, N_experts)
 
         # 2. Perform Top-K Gating
@@ -292,7 +367,11 @@ class TemporalRUSMoELayer(nn.Module):
                 original_token_indices = flat_batch_indices[mask]
                 current_routing_probs = flat_router_probs[mask].unsqueeze(-1)
                 expert_input = tokens_flat[original_token_indices]
+
+                # === Call the specific expert ===
                 expert_output = self.experts[expert_idx](expert_input)
+                # ===============================
+
                 weighted_expert_output = expert_output * current_routing_probs
                 final_output_flat.index_add_(0, original_token_indices, weighted_expert_output)
 
@@ -336,7 +415,7 @@ class TransformerBlock(nn.Module):
         src = self.norm2(src) # Layer norm
         return src
 
-# --- TRUS-MoE Transformer Block ---
+
 class TRUSMoEBlock(nn.Module):
     def __init__(self, d_model: int, nhead: int, moe_layer: TemporalRUSMoELayer, dropout: float = 0.1):
         super().__init__()
@@ -355,8 +434,6 @@ class TRUSMoEBlock(nn.Module):
         src = self.norm1(src) # Layer norm
 
         # TRUS-MoE Layer
-        # MoE layer expects (B, S, E_in) and returns (B, S, E_out), plus aux outputs
-        # Ensure d_model == moe_layer.input_dim == moe_layer.output_dim
         assert src.size(-1) == self.moe_layer.input_dim, "Dimension mismatch for MoE input"
         moe_output, aux_moe_outputs = self.moe_layer(src, rus_values, M, T)
         assert moe_output.size(-1) == self.moe_layer.output_dim, "Dimension mismatch for MoE output"
@@ -373,11 +450,12 @@ class TRUSMoEModel_LargeScale(nn.Module):
     def __init__(self,
                  input_dim: int, # Dim of input embeddings per token
                  d_model: int, # Internal model dimension
-                 nhead: int, # Num heads for MHSA
+                 nhead: int, # Num heads for MHSA AND SynergyExpert
                  d_ff: int, # Dim for FFN in standard blocks
                  num_encoder_layers: int, # Total number of blocks
                  num_moe_layers: int, # Number of blocks that should use MoE
                  moe_config: Dict, # Config for ALL MoE layers (must match d_model)
+                 num_modalities: int,
                  num_classes: int, # Output classes for classification head
                  dropout: float = 0.1,
                  max_seq_len: int = 1000): # Max combined seq length M*T
@@ -385,6 +463,11 @@ class TRUSMoEModel_LargeScale(nn.Module):
 
         assert d_model == moe_config['input_dim'], "MoE input_dim must match d_model"
         assert d_model == moe_config['output_dim'], "MoE output_dim must match d_model"
+        # Add check for synergy_expert_nhead if passed separately in moe_config
+        if 'synergy_expert_nhead' not in moe_config:
+             moe_config['synergy_expert_nhead'] = nhead # Default to same as block MHSA
+
+        self.num_modalities = num_modalities
         self.d_model = d_model
 
         # Input embedding projection (optional, if input_dim != d_model)
@@ -392,14 +475,34 @@ class TRUSMoEModel_LargeScale(nn.Module):
         self.pos_encoder = PositionalEncoding(d_model, dropout, max_seq_len)
 
         self.layers = nn.ModuleList()
-        moe_indices = set(random.sample(range(num_encoder_layers), num_moe_layers)) # Randomly choose which layers are MoE
+        # Ensure MoE layers are distributed (e.g., not all at the start/end)
+        # Simple approach: place them at regular intervals if possible
+        # TODO: check how MoE indices should be distributed perform the best
+        moe_indices = set()
+        if num_moe_layers > 0:
+            step = num_encoder_layers // num_moe_layers
+            # Place MoE layers approximately evenly spaced
+            for i in range(num_moe_layers):
+                 # Ensure index is within bounds and avoid duplicates if step is small
+                 idx = min(i * step, num_encoder_layers - 1)
+                 # Find next available slot if current is taken (can happen if step=1)
+                 while idx in moe_indices and idx < num_encoder_layers:
+                     idx += 1
+                 if idx < num_encoder_layers:
+                    moe_indices.add(idx)
+            # Ensure we have the correct number if placement failed
+            while len(moe_indices) < num_moe_layers:
+                 # Add random available indices
+                 available = set(range(num_encoder_layers)) - moe_indices
+                 if not available: break # Should not happen if num_moe_layers <= num_encoder_layers
+                 moe_indices.add(random.choice(list(available)))
+
+        print(f"MoE layers will be at indices: {sorted(list(moe_indices))}")
 
         for i in range(num_encoder_layers):
             if i in moe_indices:
                 # Create a new MoE layer instance for each block
-                moe_layer_instance = TemporalRUSMoELayer(
-                    **moe_config # Unpacks num_experts, num_synergy_experts, k, expert_hidden_dim, router_config
-                )
+                moe_layer_instance = TemporalRUSMoELayer(**moe_config)
                 self.layers.append(TRUSMoEBlock(d_model, nhead, moe_layer_instance, dropout))
             else:
                 self.layers.append(TransformerBlock(d_model, nhead, d_ff, dropout))
@@ -430,7 +533,6 @@ class TRUSMoEModel_LargeScale(nn.Module):
         x = x.view(B, S, self.d_model) # (B, S, d_model)
 
         # 2. Add Positional Encoding
-        # Needs shape (SeqLen, Batch, EmbedDim) for default PositionalEncoding
         x = x.permute(1, 0, 2) # (S, B, d_model)
         x = self.pos_encoder(x)
         x = x.permute(1, 0, 2) # Back to (B, S, d_model)
@@ -451,14 +553,11 @@ class TRUSMoEModel_LargeScale(nn.Module):
         x = self.final_norm(x) # (B, S, d_model)
 
         # 5. Output Projection & Aggregation (Example: Mean pooling over sequence for classification)
-        # Aggregate over the sequence dimension S = M*T
         aggregated_output = x.mean(dim=1) # (B, d_model)
         final_logits = self.output_proj(aggregated_output) # (B, num_classes)
 
         return final_logits, all_aux_moe_outputs
 
-
-# --- Loss Calculation Functions (Keep as before) ---
 
 def calculate_rus_losses(gating_probs: torch.Tensor,
                          rus_values: Dict[str, torch.Tensor],
@@ -543,25 +642,24 @@ def calculate_load_balancing_loss(gating_probs: torch.Tensor, expert_indices: to
     return lambda_load * load_balance_loss
 
 
-# --- Startup Example ---
-
 if __name__ == '__main__':
     # --- Configuration ---
     B, M, T, E_in = 2, 3, 10, 64  # Batch, Modalities, SeqLen, InputEmbedDim
     num_classes = 5
     d_model = 128 # Internal dimension
-    nhead = 4     # Num heads for MHSA
+    nhead = 4     # Num heads for MHSA AND SynergyExpert
     d_ff = 256    # FFN dim in standard blocks
-    num_encoder_layers = 4 # Total layers
+    num_encoder_layers = 6 # Total layers
     num_moe_layers = 2     # How many are MoE layers
     dropout = 0.1
     max_seq_len = M * T + 10 # Max sequence length for pos encoding
 
     # MoE specific config (must match d_model)
     moe_num_experts = 8
-    moe_num_synergy_experts = 2
+    moe_num_synergy_experts = 2 # First 2 experts are synergy experts
     moe_k = 2
     moe_expert_hidden_dim = 128 # Can differ from d_ff
+    moe_synergy_expert_nhead = nhead # Use same nhead for synergy expert attention
     moe_router_config = {
         "gru_hidden_dim": 64,
         "token_processed_dim": 64,
@@ -575,6 +673,7 @@ if __name__ == '__main__':
         "num_synergy_experts": moe_num_synergy_experts,
         "k": moe_k,
         "expert_hidden_dim": moe_expert_hidden_dim,
+        "synergy_expert_nhead": moe_synergy_expert_nhead, # Pass nhead for synergy expert
         "router_config": moe_router_config,
     }
 
@@ -594,6 +693,7 @@ if __name__ == '__main__':
         num_encoder_layers=num_encoder_layers,
         num_moe_layers=num_moe_layers,
         moe_config=moe_layer_config,
+        num_modalities=M,
         num_classes=num_classes,
         dropout=dropout,
         max_seq_len=max_seq_len
@@ -632,15 +732,26 @@ if __name__ == '__main__':
     total_L_load = torch.tensor(0.0, device=device)
     num_moe_layers_encountered = 0
 
-    for i, layer in enumerate(model.layers):
+    # Iterate through model layers to find MoE blocks and get aux outputs
+    # TODO: do we need to check aux outputs for each layer? or each moe layer?
+    moe_aux_output_index = 0
+    for layer in model.layers:
          if isinstance(layer, TRUSMoEBlock):
-            # Find the corresponding aux output (assuming order is preserved)
-            aux_outputs = all_aux_moe_outputs[num_moe_layers_encountered]
+            # Get the aux output for this specific MoE layer instance
+            if moe_aux_output_index < len(all_aux_moe_outputs):
+                 aux_outputs = all_aux_moe_outputs[moe_aux_output_index]
+                 moe_aux_output_index += 1
+            else:
+                # This should not happen if forward pass returned correctly
+                print("Warning: Mismatch between number of MoE blocks and aux outputs list")
+                continue
+
             num_moe_layers_encountered += 1
 
             # Extract necessary info from this layer's MoE aux output
             gating_probs = aux_outputs['gating_probs']
             expert_indices = aux_outputs['expert_indices']
+            # Access synergy indices and k from the moe_layer instance within the block
             synergy_expert_indices = layer.moe_layer.synergy_expert_indices
             k = layer.moe_layer.k
 
@@ -671,8 +782,17 @@ if __name__ == '__main__':
     # Backward pass and optimize
     if torch.isnan(total_loss) or torch.isinf(total_loss):
         print("NaN or Inf detected in total loss. Skipping backward pass.")
+        # Optionally print individual losses to debug
+        print(f"  Task Loss: {task_loss.item() if not torch.isnan(task_loss) else 'NaN'}")
+        print(f"  Avg Unique Loss: {total_L_unique.item() if not torch.isnan(total_L_unique) else 'NaN'}")
+        print(f"  Avg Redundancy Loss: {total_L_redundancy.item() if not torch.isnan(total_L_redundancy) else 'NaN'}")
+        print(f"  Avg Synergy Loss: {total_L_synergy.item() if not torch.isnan(total_L_synergy) else 'NaN'}")
+        print(f"  Avg Load Balancing Loss: {total_L_load.item() if not torch.isnan(total_L_load) else 'NaN'}")
+
     else:
         total_loss.backward()
+        # Optional: Gradient clipping
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         print(f"Total Loss: {total_loss.item():.4f}")
@@ -681,3 +801,6 @@ if __name__ == '__main__':
         print(f"  Avg Redundancy Loss: {total_L_redundancy.item():.4f}")
         print(f"  Avg Synergy Loss: {total_L_synergy.item():.4f}")
         print(f"  Avg Load Balancing Loss: {total_L_load.item():.4f}")
+
+        print("\nLarge scale model ran successfully!")
+
