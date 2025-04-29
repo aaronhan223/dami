@@ -171,4 +171,5 @@ cython_debug/
 .pypirc
 
 results/
+results_synergy/
 src/deprecated/
