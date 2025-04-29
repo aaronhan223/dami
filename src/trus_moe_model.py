@@ -324,7 +324,6 @@ class TRUSMoEBlock(nn.Module):
         return src, aux_moe_outputs
 
 
-# --- Large Scale Model ---
 class TRUSMoEModel_LargeScale(nn.Module):
     def __init__(self,
                  input_dim: int, d_model: int, nhead: int, d_ff: int,
@@ -397,8 +396,6 @@ class TRUSMoEModel_LargeScale(nn.Module):
         final_logits = self.output_proj(aggregated_output)
         return final_logits, all_aux_moe_outputs
 
-
-# --- Loss Calculation Functions ---
 
 def calculate_rus_losses(gating_probs: torch.Tensor,
                          rus_values: Dict[str, torch.Tensor],
@@ -511,14 +508,6 @@ class DummyMIMICDataset(Dataset):
         self.input_feat_dim = input_feat_dim
         self.num_classes = num_classes
 
-        # --- IMPORTANT ---
-        # This is where you would load your preprocessed MIMIC-IV data.
-        # Data should include:
-        # 1. Time-series features (e.g., vitals, labs) per patient stay.
-        # 2. Corresponding pre-computed RUS values (U, R, S) for the features/modalities over time.
-        # 3. Target labels (e.g., mortality, length-of-stay).
-        # --- --- --- ---
-
         # Generate random data for demonstration
         self.data = torch.randn(num_samples, num_modalities, seq_len, input_feat_dim)
         # Generate dummy RUS values
@@ -543,8 +532,6 @@ class DummyMIMICDataset(Dataset):
         return self.data[idx], rus_values, self.labels[idx]
 
 
-# --- Training and Validation Functions ---
-
 def train_epoch(model: TRUSMoEModel_LargeScale,
                 dataloader: DataLoader,
                 optimizer: optim.Optimizer,
@@ -562,7 +549,6 @@ def train_epoch(model: TRUSMoEModel_LargeScale,
     correct_predictions = 0
     total_samples = 0
     num_moe_layers_in_model = sum(isinstance(layer, TRUSMoEBlock) for layer in model.layers)
-
 
     progress_bar = tqdm(dataloader, desc=f"Epoch {args.current_epoch+1}/{args.epochs} [Train]", leave=False)
     for batch_idx, (data, rus_values, labels) in enumerate(progress_bar):
@@ -699,7 +685,7 @@ def validate_epoch(model: TRUSMoEModel_LargeScale,
             task_loss = task_criterion(final_logits, labels)
 
             # --- NOTE: Typically, auxiliary losses are not included in validation loss ---
-            # ---       but you could calculate them for monitoring if desired.       ---
+            # ---       but could calculate them for monitoring if desired.       ---
             # total_loss = task_loss # Just use task loss for validation metric
 
             # Accumulate losses for logging
@@ -725,8 +711,6 @@ def validate_epoch(model: TRUSMoEModel_LargeScale,
 
     return avg_task_loss, accuracy
 
-
-# --- Main Execution ---
 
 def main(args):
     """Main function to set up and run training."""
@@ -784,7 +768,6 @@ def main(args):
         "router_config": moe_router_config,
     }
 
-    # --- Model Instantiation ---
     print("Initializing model...")
     model = TRUSMoEModel_LargeScale(
         input_dim=args.input_dim,
@@ -801,13 +784,11 @@ def main(args):
     ).to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
-    # --- Optimizer and Criterion ---
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     # Assuming binary classification for MIMIC-IV task (e.g., mortality)
     # If multi-class, change num_classes and potentially the loss
     task_criterion = nn.CrossEntropyLoss() # Expects logits (B, C) and labels (B,)
 
-    # --- Training Loop ---
     print("Starting training...")
     best_val_accuracy = -1.0
     for epoch in range(args.epochs):
@@ -818,9 +799,6 @@ def main(args):
         # Simple best model saving based on validation accuracy
         if val_acc > best_val_accuracy:
             best_val_accuracy = val_acc
-            # --- Add model saving logic here ---
-            # torch.save(model.state_dict(), "best_trus_moe_model.pth")
-            # print(f"Epoch {epoch+1}: New best validation accuracy: {val_acc:.2f}%. Model saved.")
             print(f"Epoch {epoch+1}: New best validation accuracy: {val_acc:.2f}%.") # Placeholder saving msg
 
 
@@ -878,8 +856,5 @@ if __name__ == '__main__':
     parser.add_argument('--epsilon_loss', type=float, default=1e-8, help='Epsilon for stability in loss calculations')
 
     args = parser.parse_args()
-
-    # --- Run Main ---
-    # Add a placeholder for current epoch in args for logging within functions
     args.current_epoch = 0
     main(args)
