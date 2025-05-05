@@ -497,7 +497,7 @@ def multi_lag_analysis(X1, X2, Y, max_lag=5, bins=10):
     
     return results
 
-def plot_multi_lag_results(results, save_path=None):
+def plot_multi_lag_results(results, title=None, save_path=None):
     """
     Plot PID components across multiple time lags.
     
@@ -518,7 +518,10 @@ def plot_multi_lag_results(results, save_path=None):
     plt.plot(results['lag'], results['synergy'], 'm.-', label='Synergy')
     plt.xlabel('Time Lag', fontsize=20)
     plt.ylabel('Information (bits)', fontsize=20)
-    plt.title('PID Components vs Time Lag', fontsize=24)
+    if title:
+        plt.title(title, fontsize=24)
+    else:
+        plt.title('PID Components vs Time Lag', fontsize=24)
     plt.legend(fontsize=16)
     plt.grid(True, alpha=0.3)
     
@@ -534,7 +537,10 @@ def plot_multi_lag_results(results, save_path=None):
     plt.plot(results['lag'], results['total_di'], 'k--', linewidth=2, label='Total DI')
     plt.xlabel('Time Lag', fontsize=20)
     plt.ylabel('Information (bits)', fontsize=20)
-    plt.title('Stacked PID Components', fontsize=24)
+    if title:
+        plt.title(title, fontsize=24)
+    else:
+        plt.title('Stacked PID Components', fontsize=24)
     plt.legend(fontsize=16)
     plt.grid(True, alpha=0.3)
     

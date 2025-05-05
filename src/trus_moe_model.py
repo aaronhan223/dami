@@ -8,7 +8,7 @@ import random
 import argparse
 from typing import Dict, Tuple, List, Optional
 import numpy as np
-from tqdm import tqdm # For progress bars
+from tqdm import tqdm
 
 
 def JSD(p_log: torch.Tensor, q_log: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
