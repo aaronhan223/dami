@@ -12,7 +12,7 @@ import argparse
 import random
 from tqdm import tqdm
 from typing import Dict, Tuple, List, Optional, Set
-
+import pdb
 # --- Imports from project files ---
 # Assume these files are in the same directory or PYTHONPATH is set correctly
 try:
@@ -80,7 +80,7 @@ def load_simplified_rus_data(rus_filepath: str, sensor_columns: List[str], seq_l
         lag = result['lag'] # Currently unused in this simplified version
 
         if col1 not in sensor_to_idx or col2 not in sensor_to_idx:
-            # print(f"Warning: Sensor pair ({col1}, {col2}) from RUS file not in selected sensor columns. Skipping.")
+            print(f"Warning: Sensor pair ({col1}, {col2}) from RUS file not in selected sensor columns. Skipping.")
             continue
 
         m1 = sensor_to_idx[col1]
@@ -145,6 +145,7 @@ class PamapWindowDataset(Dataset):
             # Ensure columns exist in the loaded dataframe
             cols_to_use = [col for col in selected_cols_with_id if col in df.columns]
             missing_cols = set(selected_cols_with_id) - set(cols_to_use)
+            pdb.set_trace()
             if missing_cols:
                 print(f"Warning: Requested sensor columns not found in data: {missing_cols}")
 
