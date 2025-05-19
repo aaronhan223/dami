@@ -10,6 +10,7 @@ import os
 import sys
 import argparse
 import random
+import wandb
 from tqdm import tqdm
 from typing import Dict, Tuple, List, Optional, Set
 import pdb
@@ -33,8 +34,6 @@ DEFAULT_OUTPUT_DIR = "../results/pamap_training"
 # --- Helper Functions (Adapted from trus_moe_model.py) ---
 # Note: calculate_rus_losses, calculate_load_balancing_loss, JSD are imported above
 
-
-# --- Data Loading and Processing ---
 
 def load_simplified_rus_data(rus_filepath: str, sensor_columns: List[str], seq_len: int) -> Dict[str, torch.Tensor]:
     """
@@ -145,7 +144,6 @@ class PamapWindowDataset(Dataset):
             # Ensure columns exist in the loaded dataframe
             cols_to_use = [col for col in selected_cols_with_id if col in df.columns]
             missing_cols = set(selected_cols_with_id) - set(cols_to_use)
-            pdb.set_trace()
             if missing_cols:
                 print(f"Warning: Requested sensor columns not found in data: {missing_cols}")
 
@@ -336,6 +334,19 @@ def train_epoch(model: TRUSMoEModel_LargeScale,
     avg_load_loss = load_loss_accum / num_batches
     accuracy = 100. * correct_predictions / total_samples if total_samples > 0 else 0.0
 
+    # Log metrics to wandb
+    if args.use_wandb:
+        wandb.log({
+            "train/total_loss": avg_total_loss,
+            "train/task_loss": avg_task_loss,
+            "train/unique_loss": avg_unique_loss,
+            "train/redundancy_loss": avg_redundancy_loss,
+            "train/synergy_loss": avg_synergy_loss,
+            "train/load_balancing_loss": avg_load_loss,
+            "train/accuracy": accuracy,
+            "epoch": current_epoch + 1
+        })
+
     print(f"Epoch {current_epoch+1} [Train] Avg Loss: {avg_total_loss:.4f}, Task Loss: {avg_task_loss:.4f}, Accuracy: {accuracy:.2f}%")
     print(f"  Aux Losses -> Unique: {avg_unique_loss:.4f}, Redundancy: {avg_redundancy_loss:.4f}, Synergy: {avg_synergy_loss:.4f}, Load: {avg_load_loss:.4f}")
 
@@ -387,18 +398,39 @@ def validate_epoch(model: TRUSMoEModel_LargeScale,
     avg_task_loss = task_loss_accum / num_batches
     accuracy = 100. * correct_predictions / total_samples if total_samples > 0 else 0.0
 
+    # Log validation metrics to wandb
+    if args.use_wandb:
+        wandb.log({
+            "val/task_loss": avg_task_loss,
+            "val/accuracy": accuracy,
+            "epoch": current_epoch + 1
+        })
+
     print(f"Epoch {current_epoch+1} [Val] Avg Task Loss: {avg_task_loss:.4f}, Accuracy: {accuracy:.2f}%")
 
     return avg_task_loss, accuracy
 
-# --- Main Function ---
 
 def main(args):
     """Main function to set up and run training."""
+    # Initialize wandb if enabled
+    if args.use_wandb:
+        wandb_config = {k: v for k, v in vars(args).items()}
+        run_name = f"subj{args.subject_id}_seq{args.seq_len}_moe{args.num_moe_layers}"
+        if args.wandb_run_name:
+            run_name = args.wandb_run_name
+            
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            config=wandb_config,
+            name=run_name,
+            mode="online" if not args.wandb_disabled else "disabled"
+        )
+    
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     print(f"Using device: {device}")
 
-    # --- Seed for reproducibility ---
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -408,7 +440,6 @@ def main(args):
         # torch.backends.cudnn.deterministic = True
         # torch.backends.cudnn.benchmark = False
 
-    # --- Output Directory ---
     os.makedirs(args.output_dir, exist_ok=True)
 
     # --- Load and Preprocess Data (Get full sensor list and activity map first) ---
@@ -446,7 +477,6 @@ def main(args):
     except Exception as e:
         print(f"An error occurred during initial data loading: {e}")
         sys.exit(1)
-
 
     # --- Load RUS Data ---
     rus_file = args.rus_file_pattern.format(
@@ -585,6 +615,15 @@ def main(args):
                      'args': args # Save args for reference
                  }, save_path)
                  print(f"Epoch {epoch+1}: New best validation accuracy: {val_acc:.2f}%. Model saved to {save_path}")
+                 
+                 # Log best model to wandb if enabled
+                 if args.use_wandb:
+                     wandb.log({"best_val_accuracy": best_val_accuracy, "best_epoch": epoch + 1})
+                     # Save best model as an artifact
+                     if args.wandb_log_model:
+                         model_artifact = wandb.Artifact(f"model-subj{args.subject_id}", type="model")
+                         model_artifact.add_file(save_path)
+                         wandb.log_artifact(model_artifact)
         else:
              print(f"Epoch {epoch+1}: No validation set. Skipping validation and model saving.")
 
@@ -594,6 +633,10 @@ def main(args):
         print(f"Best Validation Accuracy: {best_val_accuracy:.2f}% at epoch {best_epoch+1}")
     else:
         print("Training finished (no validation performed or no improvement).")
+        
+    # Finish wandb run
+    if args.use_wandb:
+        wandb.finish()
 
 
 if __name__ == '__main__':
@@ -653,5 +696,25 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_load', type=float, default=0.01, help='Weight for load balancing loss')
     parser.add_argument('--epsilon_loss', type=float, default=1e-8, help='Epsilon for stability in loss calculations')
 
+    # Wandb args
+    parser.add_argument('--use_wandb', action='store_true', help='Enable Weights & Biases logging')
+    parser.add_argument('--wandb_project', type=str, default='pamap-trus-moe', help='wandb project name')
+    parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity/username')
+    parser.add_argument('--wandb_run_name', type=str, default=None, help='wandb run name (defaults to subj{subject_id}_seq{seq_len}_moe{num_moe_layers})')
+    parser.add_argument('--wandb_disabled', action='store_true', help='Disable wandb even if --use_wandb is set (useful for debugging)')
+    parser.add_argument('--wandb_log_model', action='store_true', help='Log best model as wandb artifact')
+    parser.add_argument('--wandb_sweep', action='store_true', help='Enable hyperparameter sweep mode')
+
     args = parser.parse_args()
+    
+    # If wandb sweep is enabled, get hyperparameters from wandb
+    if args.use_wandb and args.wandb_sweep:
+        # Initialize wandb in sweep mode
+        wandb.init()
+        # Update args with sweep config
+        sweep_config = wandb.config
+        for key, value in sweep_config.items():
+            if hasattr(args, key):
+                setattr(args, key, value)
+    
     main(args) 

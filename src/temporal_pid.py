@@ -40,129 +40,99 @@ def estimate_transfer_entropy(source, target, lag=1, bins=10, method='binned'):
     source_past = source[:-lag]
     target_past = target[:-lag]
     target_present = target[lag:]
-    if method == 'binned':
-        # Discretize data if continuous
-        if not np.array_equal(source, source.astype(int)) or not np.array_equal(target, target.astype(int)):
-            # Discretize continuous data using digitize instead of histogram
-            source_bins = np.linspace(min(source_past), max(source_past), bins+1)
-            target_bins = np.linspace(min(target), max(target), bins+1)
-            
-            source_past_disc = np.digitize(source_past, source_bins)
-            target_past_disc = np.digitize(target_past, target_bins)
-            target_present_disc = np.digitize(target_present, target_bins)
-        else:
-            # Already discrete
-            source_past_disc = source_past
-            target_past_disc = target_past
-            target_present_disc = target_present
+    # Discretize data if continuous
+    if not np.array_equal(source, source.astype(int)) or not np.array_equal(target, target.astype(int)):
+        # Discretize continuous data using digitize instead of histogram
+        source_bins = np.linspace(min(source_past), max(source_past), bins+1)
+        target_bins = np.linspace(min(target), max(target), bins+1)
         
-        # Calculate transfer entropy using rel_entr from scipy.special
-        if bins <= 5:  # Only use this approach for reasonable bin sizes
-            # Create joint probability distributions
-            
-            # 1. Joint distribution P(target_present, source_past, target_past)
-            P_joint = np.zeros((bins, bins, bins))
-            # 2. Joint distribution P(target_present, target_past)
-            P_target = np.zeros((bins, bins))
-            
-            # Count occurrences to estimate probabilities
-            for i in range(len(target_present_disc)):
-                # Ensure indices are within bounds
-                tp = min(target_present_disc[i]-1, bins-1)
-                sp = min(source_past_disc[i]-1, bins-1)
-                tpa = min(target_past_disc[i]-1, bins-1)
-                
-                # Handle case where indices are negative (below the first bin edge)
-                tp = max(tp, 0)
-                sp = max(sp, 0)
-                tpa = max(tpa, 0)
-                
-                # Count joint occurrences
-                P_joint[tp, sp, tpa] += 1
-                P_target[tp, tpa] += 1
-            
-            # Normalize to get probability distributions
-            P_joint = P_joint / np.sum(P_joint)
-            P_target = P_target / np.sum(P_target)
-            
-            # Compute conditional distributions
-            
-            # 1. P(target_present | source_past, target_past)
-            P_joint_cond = np.zeros_like(P_joint)
-            P_source_target_past = np.sum(P_joint, axis=0)  # P(source_past, target_past)
-            
-            for tp in range(bins):
-                for sp in range(bins):
-                    for tpa in range(bins):
-                        if P_source_target_past[sp, tpa] > 0:
-                            P_joint_cond[tp, sp, tpa] = P_joint[tp, sp, tpa] / P_source_target_past[sp, tpa]
-            
-            # 2. P(target_present | target_past)
-            P_target_cond = np.zeros_like(P_target)
-            P_target_past = np.sum(P_target, axis=0)  # P(target_past)
-            
-            for tp in range(bins):
-                for tpa in range(bins):
-                    if P_target_past[tpa] > 0:
-                        P_target_cond[tp, tpa] = P_target[tp, tpa] / P_target_past[tpa]
-            
-            # Calculate KL divergence (relative entropy) between conditional distributions using rel_entr
-            te = 0.0
-            for tp in range(bins):
-                for sp in range(bins):
-                    for tpa in range(bins):
-                        if P_joint[tp, sp, tpa] > 0 and P_target_cond[tp, tpa] > 0:
-                            # Use rel_entr from scipy.special
-                            # rel_entr(p, q) = p * log(p / q)
-                            te += rel_entr(P_joint_cond[tp, sp, tpa], P_target_cond[tp, tpa]) * P_joint[tp, sp, tpa]
-            
-            # Convert from nats to bits (rel_entr uses natural log)
-            te = te / np.log(2)
-            return max(0, te)  # Ensure non-negative
-        else:
-            # For larger bin sizes, fall back to the original implementation which is more efficient
-            # Create joint variable by encoding the joint state as a single integer
-            joint_past_disc = source_past_disc * bins + target_past_disc
-            
-            # Calculate I(target_present; source_past, target_past)
-            mi_joint = mutual_info_score(joint_past_disc, target_present_disc) / np.log(2)  # Convert to bits
-            
-            # Calculate I(target_present; target_past)
-            mi_target_past = mutual_info_score(target_past_disc, target_present_disc) / np.log(2)  # Convert to bits
-            
-            # Transfer entropy
-            te = mi_joint - mi_target_past
-            return max(0, te)  # Ensure non-negative
-    
-    elif method == 'ksg':
-        # KSG estimator requires additional libraries
-        try:
-            import jpype
-            import pyinfo
-            
-            # Initialize Java VM if not already running
-            if not jpype.isJVMStarted():
-                jpype.startJVM(pyinfo.getDefaultJVMPath(), "-ea")
-                
-            # Calculate TE using JIDT
-            from jpype import javax, java
-            from jpype import JPackage
-            
-            teCalcClass = JPackage("infodynamics.measures.continuous.kraskov").TransferEntropyCalculatorKraskov
-            teCalc = teCalcClass()
-            teCalc.setProperty("k", "4")  # Use 4 nearest neighbors
-            teCalc.initialise(lag)
-            teCalc.setObservations(java.lang.reflect.Array.newInstance(java.lang.Double.TYPE, len(source_past)), 
-                                  java.lang.reflect.Array.newInstance(java.lang.Double.TYPE, len(target_past)))
-            te = teCalc.computeAverageLocalOfObservations()
-            
-            return te
-            
-        except ImportError:
-            print("KSG estimator requires jpype and JIDT. Falling back to binned estimator.")
-            return estimate_transfer_entropy(source, target, lag, bins, method='binned')
+        source_past_disc = np.digitize(source_past, source_bins)
+        target_past_disc = np.digitize(target_past, target_bins)
+        target_present_disc = np.digitize(target_present, target_bins)
     else:
-        raise ValueError("Method must be 'binned' or 'ksg'")
+        # Already discrete
+        source_past_disc = source_past
+        target_past_disc = target_past
+        target_present_disc = target_present
+    
+    # Calculate transfer entropy using rel_entr from scipy.special
+    if bins <= 5:  # Only use this approach for reasonable bin sizes
+        # Create joint probability distributions
+        
+        # 1. Joint distribution P(target_present, source_past, target_past)
+        P_joint = np.zeros((bins, bins, bins))
+        # 2. Joint distribution P(target_present, target_past)
+        P_target = np.zeros((bins, bins))
+        
+        # Count occurrences to estimate probabilities
+        for i in range(len(target_present_disc)):
+            # Ensure indices are within bounds
+            tp = min(target_present_disc[i]-1, bins-1)
+            sp = min(source_past_disc[i]-1, bins-1)
+            tpa = min(target_past_disc[i]-1, bins-1)
+            
+            # Handle case where indices are negative (below the first bin edge)
+            tp = max(tp, 0)
+            sp = max(sp, 0)
+            tpa = max(tpa, 0)
+            
+            # Count joint occurrences
+            P_joint[tp, sp, tpa] += 1
+            P_target[tp, tpa] += 1
+        
+        # Normalize to get probability distributions
+        P_joint = P_joint / np.sum(P_joint)
+        P_target = P_target / np.sum(P_target)
+        
+        # Compute conditional distributions
+        
+        # 1. P(target_present | source_past, target_past)
+        P_joint_cond = np.zeros_like(P_joint)
+        P_source_target_past = np.sum(P_joint, axis=0)  # P(source_past, target_past)
+        
+        for tp in range(bins):
+            for sp in range(bins):
+                for tpa in range(bins):
+                    if P_source_target_past[sp, tpa] > 0:
+                        P_joint_cond[tp, sp, tpa] = P_joint[tp, sp, tpa] / P_source_target_past[sp, tpa]
+        
+        # 2. P(target_present | target_past)
+        P_target_cond = np.zeros_like(P_target)
+        P_target_past = np.sum(P_target, axis=0)  # P(target_past)
+        
+        for tp in range(bins):
+            for tpa in range(bins):
+                if P_target_past[tpa] > 0:
+                    P_target_cond[tp, tpa] = P_target[tp, tpa] / P_target_past[tpa]
+        
+        # Calculate KL divergence (relative entropy) between conditional distributions using rel_entr
+        te = 0.0
+        for tp in range(bins):
+            for sp in range(bins):
+                for tpa in range(bins):
+                    if P_joint[tp, sp, tpa] > 0 and P_target_cond[tp, tpa] > 0:
+                        # Use rel_entr from scipy.special
+                        # rel_entr(p, q) = p * log(p / q)
+                        te += rel_entr(P_joint_cond[tp, sp, tpa], P_target_cond[tp, tpa]) * P_joint[tp, sp, tpa]
+        
+        # Convert from nats to bits (rel_entr uses natural log)
+        te = te / np.log(2)
+        return max(0, te)  # Ensure non-negative
+    else:
+        # For larger bin sizes, fall back to the original implementation which is more efficient
+        # Create joint variable by encoding the joint state as a single integer
+        joint_past_disc = source_past_disc * bins + target_past_disc
+        
+        # Calculate I(target_present; source_past, target_past)
+        mi_joint = mutual_info_score(joint_past_disc, target_present_disc) / np.log(2)  # Convert to bits
+        
+        # Calculate I(target_present; target_past)
+        mi_target_past = mutual_info_score(target_past_disc, target_present_disc) / np.log(2)  # Convert to bits
+        
+        # Transfer entropy
+        te = mi_joint - mi_target_past
+        return max(0, te)  # Ensure non-negative
+        
 
 def create_probability_distribution(X1, X2, Y, lag=1, bins=10):
     """
@@ -183,10 +153,14 @@ def create_probability_distribution(X1, X2, Y, lag=1, bins=10):
         3D array of joint probability distribution P(X1_past, X2_past, Y_present)
     """
     # Adjust for lag
-    # TODO: figure out how adjusting lag affects the results
-    X1_past = X1[:-lag]
-    X2_past = X2[:-lag]
-    Y_present = Y[lag:]
+    if lag == 0:
+        X1_past = X1
+        X2_past = X2
+        Y_present = Y
+    else:
+        X1_past = X1[:-lag]
+        X2_past = X2[:-lag]
+        Y_present = Y[lag:]
     # Discretize continuous data if needed
     if not np.array_equal(X1_past, X1_past.astype(int)) or not np.array_equal(X2_past, X2_past.astype(int)) or not np.array_equal(Y_present, Y_present.astype(int)):
         # Get bin edges
@@ -484,7 +458,7 @@ def multi_lag_analysis(X1, X2, Y, max_lag=5, bins=10):
         'total_di': []
     }
     
-    for lag in range(1, max_lag + 1):
+    for lag in range(max_lag):
         print(f"Analyzing lag {lag}...")
         pid_result = temporal_pid(X1, X2, Y, lag, bins)
         

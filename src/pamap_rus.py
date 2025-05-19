@@ -14,10 +14,10 @@ import pdb
 # Define constants
 DATASET_DIR = "/cis/home/xhan56/pamap/PAMAP2_Dataset/Protocol"
 OUTPUT_DIR = "../results/pamap"
-SUBJECT_ID = 1
+SUBJECT_ID = 9
 MAX_LAG = 10
 BINS = 8
-DOMINANCE_THRESHOLD = 0.3 # Threshold for a PID term to be considered dominant
+DOMINANCE_THRESHOLD = 0.4 # Threshold for a PID term to be considered dominant
 
 def get_pamap_column_names():
     """Returns the standard column names for PAMAP2 dataset files."""
@@ -101,6 +101,7 @@ def main():
     print(f"Generated {len(sensor_pairs)} pairs of sensor variables for analysis.")
 
     dominant_pid_results = [] # List to store results where a term is dominant
+    DOMINANCE_PERCENTAGE = 0.9  # 90% threshold for dominance across time lags
 
     for i, (col1, col2) in enumerate(sensor_pairs):
         print(f"\n--- Analyzing Pair {i+1}/{len(sensor_pairs)}: {col1} vs {col2} --- ")
@@ -124,44 +125,95 @@ def main():
             print(f"Error during PID analysis for pair ({col1}, {col2}): {e}")
             continue
 
-        # --- Check for dominance and collect results ---
-        lags = pid_results.get('lag', range(MAX_LAG + 1)) # Assuming pid_results has 'lag' key or default to range
+        # --- Analyze dominance across all lags as a unit ---
+        lags = pid_results.get('lag', range(MAX_LAG + 1))
+        dominant_counts = {'R': 0, 'U1': 0, 'U2': 0, 'S': 0}
+        total_valid_lags = 0
+        
+        lag_results = []  # Store results for all lags for this pair
+        
         for lag_idx, lag in enumerate(lags):
             try:
                 r = pid_results['redundancy'][lag_idx]
-                u1 = pid_results['unique_x1'][lag_idx] # Unique info from X1 (col1)
-                u2 = pid_results['unique_x2'][lag_idx] # Unique info from X2 (col2)
+                u1 = pid_results['unique_x1'][lag_idx]
+                u2 = pid_results['unique_x2'][lag_idx]
                 s = pid_results['synergy'][lag_idx]
                 mi = pid_results['total_di'][lag_idx]
 
-                if mi > 1e-9: # Avoid division by zero or near-zero MI
-                    dominant_term = None
-                    if r / mi > DOMINANCE_THRESHOLD:
-                        dominant_term = 'R'
-                    elif u1 / mi > DOMINANCE_THRESHOLD:
-                        dominant_term = 'U1'
-                    elif u2 / mi > DOMINANCE_THRESHOLD:
-                        dominant_term = 'U2'
-                    elif s / mi > DOMINANCE_THRESHOLD:
-                        dominant_term = 'S'
-
-                    if dominant_term:
-                        dominant_pid_results.append({
-                            'feature_pair': (col1, col2),
-                            'lag': lag,
-                            'dominant_term': dominant_term,
-                            'R_value': r,
-                            'U1_value': u1,
-                            'U2_value': u2,
-                            'S_value': s,
-                            'MI_value': mi
-                        })
+                if mi > 1e-9:  # Avoid division by zero or near-zero MI
+                    total_valid_lags += 1
+                    
+                    # Get normalized values for each term
+                    r_norm = r / mi
+                    u1_norm = u1 / mi
+                    u2_norm = u2 / mi
+                    s_norm = s / mi
+                    
+                    # Find the term with the highest value
+                    norm_values = {
+                        'R': r_norm,
+                        'U1': u1_norm,
+                        'U2': u2_norm,
+                        'S': s_norm
+                    }
+                    max_term = max(norm_values, key=norm_values.get)
+                    max_value = norm_values[max_term]
+                    
+                    # If highest and above threshold, count it
+                    if max_value > DOMINANCE_THRESHOLD:
+                        dominant_counts[max_term] += 1
+                    
+                    # Store this lag's result
+                    lag_results.append({
+                        'lag': lag,
+                        'R_value': r,
+                        'U1_value': u1,
+                        'U2_value': u2,
+                        'S_value': s,
+                        'MI_value': mi,
+                        'R_norm': r_norm,
+                        'U1_norm': u1_norm,
+                        'U2_norm': u2_norm,
+                        'S_norm': s_norm
+                    })
             except IndexError:
-                 print(f"Warning: Index out of bounds for lag {lag} (index {lag_idx}) for pair ({col1}, {col2}). Skipping lag.")
-                 continue
+                print(f"Warning: Index out of bounds for lag {lag} (index {lag_idx}) for pair ({col1}, {col2}). Skipping lag.")
+                continue
             except KeyError as e:
-                 print(f"Warning: Missing key {e} in pid_results for pair ({col1}, {col2}). Skipping dominance check.")
-                 break # Stop checking lags for this pair if keys are missing
+                print(f"Warning: Missing key {e} in pid_results for pair ({col1}, {col2}). Skipping dominance check.")
+                break  # Stop checking lags for this pair if keys are missing
+        
+        # Check if we have enough valid lags to evaluate
+        if total_valid_lags > 0:
+            # Find term that is dominant across at least 90% of the lags
+            for term, count in dominant_counts.items():
+                dominance_ratio = count / total_valid_lags
+                if dominance_ratio >= DOMINANCE_PERCENTAGE:
+                    print(f"Found dominant term {term} for pair ({col1}, {col2}) across {dominance_ratio:.1%} of lags")
+                    
+                    # Calculate average metrics across all lags
+                    avg_metrics = {
+                        'R_value': np.mean([r['R_value'] for r in lag_results]),
+                        'U1_value': np.mean([r['U1_value'] for r in lag_results]),
+                        'U2_value': np.mean([r['U2_value'] for r in lag_results]), 
+                        'S_value': np.mean([r['S_value'] for r in lag_results]),
+                        'MI_value': np.mean([r['MI_value'] for r in lag_results]),
+                        'R_norm': np.mean([r['R_norm'] for r in lag_results]),
+                        'U1_norm': np.mean([r['U1_norm'] for r in lag_results]),
+                        'U2_norm': np.mean([r['U2_norm'] for r in lag_results]),
+                        'S_norm': np.mean([r['S_norm'] for r in lag_results])
+                    }
+                    
+                    # Store this pair's result
+                    dominant_pid_results.append({
+                        'feature_pair': (col1, col2),
+                        'dominant_term': term,
+                        'dominance_ratio': dominance_ratio,
+                        'lags_analyzed': total_valid_lags,
+                        'avg_metrics': avg_metrics,
+                        'lag_results': lag_results
+                    })
+                    break  # We've found the dominant term, no need to check others
 
         # --- Commented out plotting ---
         # sanitized_col1 = col1.replace('_', '-').replace('.', '')
@@ -180,7 +232,7 @@ def main():
 
     # --- Save dominant PID results ---
     if dominant_pid_results:
-        output_filename = f'pamap_subject{SUBJECT_ID}_lag{MAX_LAG}_bins{BINS}_thresh{DOMINANCE_THRESHOLD:.1f}.npy'
+        output_filename = f'pamap_subject{SUBJECT_ID}_lag{MAX_LAG}_bins{BINS}_thresh{DOMINANCE_THRESHOLD:.1f}_pct{int(DOMINANCE_PERCENTAGE*100)}.npy'
         output_path = os.path.join(OUTPUT_DIR, output_filename)
         print(f"Saving {len(dominant_pid_results)} dominant PID results to {output_path}...")
         np.save(output_path, dominant_pid_results, allow_pickle=True) # Need allow_pickle=True for list of dicts
@@ -194,13 +246,13 @@ def main():
                 dominance_counts[term] += 1
 
         print("\n--- Dominance Summary ---")
-        print(f"Total dominant instances found: {len(dominant_pid_results)}")
+        print(f"Total feature pairs with dominant terms: {len(dominant_pid_results)}")
         for term, count in dominance_counts.items():
-            print(f"  {term} dominant: {count} times")
+            print(f"  {term} dominant: {count} pairs")
         print("-------------------------")
 
     else:
-        print("No dominant PID terms found with the current threshold.")
+        print("No dominant PID terms found with the current threshold and percentage criteria.")
 
 if __name__ == "__main__":
     main()
