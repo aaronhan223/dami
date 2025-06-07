@@ -98,7 +98,7 @@ class SynergyExpert(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         N_for_expert = x.size(0)
         if N_for_expert <= 1:
-             attn_output = x
+            attn_output = x
         else:
             # Treat N_for_expert as sequence length for MHA (batch size 1)
             x_attn_input = x.unsqueeze(0) # Shape (1, N_for_expert, E_in)
@@ -114,7 +114,6 @@ class SynergyExpert(nn.Module):
 
 
 # --- Router Implementation ---
-
 class RUSAwareGatingNetworkWithAttention(nn.Module):
     """
     RUS-aware gating network using attention for pairwise R/S aggregation.
@@ -205,7 +204,6 @@ class RUSAwareGatingNetworkWithAttention(nn.Module):
 
 
 # --- MoE Layer Implementation ---
-
 class TemporalRUSMoELayer(nn.Module):
     """
     Implements the Mixture-of-Experts layer with RUS-aware gating.

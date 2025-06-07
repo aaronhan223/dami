@@ -173,3 +173,4 @@ cython_debug/
 results/
 results_synergy/
 src/deprecated/
+scripts/wandb/

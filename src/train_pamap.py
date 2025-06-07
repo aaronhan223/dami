@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 import numpy as np
 import pandas as pd
 import math
@@ -14,8 +17,7 @@ import wandb
 from tqdm import tqdm
 from typing import Dict, Tuple, List, Optional, Set
 import pdb
-# --- Imports from project files ---
-# Assume these files are in the same directory or PYTHONPATH is set correctly
+
 try:
     from trus_moe_model import TRUSMoEModel_LargeScale, TRUSMoEBlock, calculate_rus_losses, calculate_load_balancing_loss, JSD
     from pamap_rus import get_pamap_column_names, load_pamap_data, preprocess_pamap_data
@@ -24,25 +26,19 @@ except ImportError as e:
     print("Please ensure trus_moe_model.py and pamap_rus.py are accessible.")
     sys.exit(1)
 
-# --- Constants ---
-# Default values, can be overridden by args
+
 DEFAULT_DATASET_DIR = "/cis/home/xhan56/pamap/PAMAP2_Dataset/Protocol"
-DEFAULT_RUS_FILE_PATTERN = "../results/pamap/pamap_subject{SUBJECT_ID}_lag{MAX_LAG}_bins{BINS}_thresh{DOMINANCE_THRESHOLD:.1f}.npy"
+DEFAULT_RUS_FILE_PATTERN = "../results/pamap/pamap_subject{SUBJECT_ID}_lag{MAX_LAG}_bins{BINS}_thresh{DOMINANCE_THRESHOLD:.1f}_pct{DOMINANCE_PERCENTAGE}.npy"
 DEFAULT_OUTPUT_DIR = "../results/pamap_training"
-
-
-# --- Helper Functions (Adapted from trus_moe_model.py) ---
-# Note: calculate_rus_losses, calculate_load_balancing_loss, JSD are imported above
 
 
 def load_simplified_rus_data(rus_filepath: str, sensor_columns: List[str], seq_len: int) -> Dict[str, torch.Tensor]:
     """
     Loads the pre-computed dominant RUS terms from the .npy file and creates
-    simplified, dense tensors (U, R, S) usable by the model's auxiliary losses.
+    tensors with full RUS quantities across time lags.
 
-    Strategy: Use binary indicators based on the *first* dominant term found for a pair.
-              Propagate this indicator across the entire sequence length T.
-              U is marked per modality if *any* pair involving it shows dominance.
+    This function loads data saved by pamap_rus.py which contains detailed
+    lag-specific information for each feature pair that meets dominance criteria.
 
     Args:
         rus_filepath: Path to the .npy file containing dominant PID results.
@@ -59,7 +55,7 @@ def load_simplified_rus_data(rus_filepath: str, sensor_columns: List[str], seq_l
     if not os.path.exists(rus_filepath):
         raise FileNotFoundError(f"RUS data file not found: {rus_filepath}")
 
-    print(f"Loading simplified RUS data from: {rus_filepath}")
+    print(f"Loading RUS data from: {rus_filepath}")
     dominant_pid_results = np.load(rus_filepath, allow_pickle=True)
 
     M = len(sensor_columns)
@@ -71,13 +67,13 @@ def load_simplified_rus_data(rus_filepath: str, sensor_columns: List[str], seq_l
     R = torch.zeros(M, M, T, dtype=torch.float32)
     S = torch.zeros(M, M, T, dtype=torch.float32)
 
-    processed_pairs = set() # Track pairs to use only the first dominant term found
+    # Track which pairs we've processed
+    processed_pairs = set()
 
     for result in dominant_pid_results:
         col1, col2 = result['feature_pair']
         dominant_term = result['dominant_term']
-        lag = result['lag'] # Currently unused in this simplified version
-
+        
         if col1 not in sensor_to_idx or col2 not in sensor_to_idx:
             print(f"Warning: Sensor pair ({col1}, {col2}) from RUS file not in selected sensor columns. Skipping.")
             continue
@@ -85,26 +81,50 @@ def load_simplified_rus_data(rus_filepath: str, sensor_columns: List[str], seq_l
         m1 = sensor_to_idx[col1]
         m2 = sensor_to_idx[col2]
         pair_key = tuple(sorted((m1, m2)))
-
-        # Only process the first dominant term encountered for a pair
-        if pair_key not in processed_pairs:
-            processed_pairs.add(pair_key)
+        
+        # Skip if we've already processed this pair
+        if pair_key in processed_pairs:
+            continue
+            
+        processed_pairs.add(pair_key)
+        
+        # Get lag-specific results
+        lag_results = result['lag_results']
+        num_lags = len(lag_results)
+        
+        # Distribute the lag values across the sequence
+        # Simple approach: divide sequence into num_lags segments
+        segment_length = max(1, T // num_lags)
+        
+        for lag_idx, lag_data in enumerate(lag_results):
+            # Calculate the segment range
+            start_idx = lag_idx * segment_length
+            end_idx = min(T, (lag_idx + 1) * segment_length)
+            
+            # If we're at the last lag, extend to the end of sequence
+            if lag_idx == num_lags - 1:
+                end_idx = T
+                
+            if start_idx >= T:
+                break
+                
+            # Fill in the RUS values for this segment
             if dominant_term == 'R':
-                R[m1, m2, :] = 1.0
-                R[m2, m1, :] = 1.0
+                R[m1, m2, start_idx:end_idx] = lag_data['R_value']
+                R[m2, m1, start_idx:end_idx] = lag_data['R_value']
             elif dominant_term == 'S':
-                S[m1, m2, :] = 1.0
-                S[m2, m1, :] = 1.0
-            elif dominant_term == 'U1': # Uniqueness associated with col1 (m1)
-                U[m1, :] = 1.0
-            elif dominant_term == 'U2': # Uniqueness associated with col2 (m2)
-                U[m2, :] = 1.0
+                S[m1, m2, start_idx:end_idx] = lag_data['S_value']
+                S[m2, m1, start_idx:end_idx] = lag_data['S_value']
+            elif dominant_term == 'U1':
+                U[m1, start_idx:end_idx] = lag_data['U1_value']
+            elif dominant_term == 'U2':
+                U[m2, start_idx:end_idx] = lag_data['U2_value']
 
-    print(f"Simplified RUS data loaded. Shapes: U({U.shape}), R({R.shape}), S({S.shape})")
-    # Log some stats
-    print(f"  Number of R=1 entries (per time step): {int(R.sum() / T / 2)}") # Divide by 2 for symmetry
-    print(f"  Number of S=1 entries (per time step): {int(S.sum() / T / 2)}")
-    print(f"  Number of U=1 entries (per time step): {int(U.sum() / T)}")
+    print(f"RUS data loaded. Shapes: U({U.shape}), R({R.shape}), S({S.shape})")
+    print(f"  Average R value: {R.mean().item():.4f}")
+    print(f"  Average S value: {S.mean().item():.4f}")
+    print(f"  Average U value: {U.mean().item():.4f}")
+    print(f"  Number of feature pairs processed: {len(processed_pairs)}")
 
     return {'U': U, 'R': R, 'S': S}
 
@@ -140,7 +160,7 @@ class PamapWindowDataset(Dataset):
         try:
             df = load_pamap_data(self.subject_id, self.data_dir)
             # Use only selected sensor columns + activity_id
-            selected_cols_with_id = ['activity_id'] + self.sensor_columns
+            selected_cols_with_id = ['timestamp', 'activity_id'] + self.sensor_columns
             # Ensure columns exist in the loaded dataframe
             cols_to_use = [col for col in selected_cols_with_id if col in df.columns]
             missing_cols = set(selected_cols_with_id) - set(cols_to_use)
@@ -201,10 +221,9 @@ class PamapWindowDataset(Dataset):
     def __getitem__(self, idx):
         # Data shape (M, T, E_in=1), RUS dict (U:(M,T), R:(M,M,T), S:(M,M,T)), label (scalar)
         # Note: The RUS data is static for all windows in this simplified approach
+        # TODO: make sure R/S pairs are corresponding to the same feature pairs, check model script
         return self.windows[idx], self.rus_data, self.labels[idx]
 
-
-# --- Training and Validation Loops ---
 
 def train_epoch(model: TRUSMoEModel_LargeScale,
                 dataloader: DataLoader,
@@ -223,9 +242,13 @@ def train_epoch(model: TRUSMoEModel_LargeScale,
     load_loss_accum = 0.0
     correct_predictions = 0
     total_samples = 0
-    num_moe_layers_in_model = sum(isinstance(layer, TRUSMoEBlock) for layer in model.layers)
 
-    progress_bar = tqdm(dataloader, desc=f"Epoch {current_epoch+1}/{args.epochs} [Train]", leave=False)
+    # Set epoch for distributed sampler if using
+    if args.distributed and isinstance(dataloader.sampler, DistributedSampler):
+        dataloader.sampler.set_epoch(current_epoch)
+
+    progress_bar = tqdm(dataloader, desc=f"Epoch {current_epoch+1}/{args.epochs} [Train]", leave=False, 
+                         disable=args.distributed and dist.get_rank() != 0)
     for batch_idx, (data, rus_values_batch, labels) in enumerate(progress_bar):
         # data shape: (B, M, T, E_in)
         # rus_values_batch: Dict where each value is (B, M, T) or (B, M, M, T)
@@ -236,7 +259,7 @@ def train_epoch(model: TRUSMoEModel_LargeScale,
         rus_values = {k: v.to(device) for k, v in rus_values_batch.items()}
         labels = labels.to(device)
 
-        B, M, T, E_in = data.shape
+        # B, M, T, E_in = data.shape
 
         optimizer.zero_grad()
 
@@ -335,7 +358,7 @@ def train_epoch(model: TRUSMoEModel_LargeScale,
     accuracy = 100. * correct_predictions / total_samples if total_samples > 0 else 0.0
 
     # Log metrics to wandb
-    if args.use_wandb:
+    if args.use_wandb and (not args.distributed or (args.distributed and dist.get_rank() == 0)):
         wandb.log({
             "train/total_loss": avg_total_loss,
             "train/task_loss": avg_task_loss,
@@ -399,7 +422,7 @@ def validate_epoch(model: TRUSMoEModel_LargeScale,
     accuracy = 100. * correct_predictions / total_samples if total_samples > 0 else 0.0
 
     # Log validation metrics to wandb
-    if args.use_wandb:
+    if args.use_wandb and (not args.distributed or (args.distributed and dist.get_rank() == 0)):
         wandb.log({
             "val/task_loss": avg_task_loss,
             "val/accuracy": accuracy,
@@ -413,10 +436,10 @@ def validate_epoch(model: TRUSMoEModel_LargeScale,
 
 def main(args):
     """Main function to set up and run training."""
-    # Initialize wandb if enabled
-    if args.use_wandb:
+    # Initialize wandb if enabled - only on main process if distributed
+    if args.use_wandb and (not args.distributed or (args.distributed and dist.get_rank() == 0)):
         wandb_config = {k: v for k, v in vars(args).items()}
-        run_name = f"subj{args.subject_id}_seq{args.seq_len}_moe{args.num_moe_layers}"
+        run_name = f"subj{args.subject_id}_seq{args.seq_len}_moe{args.num_moe_layers}_thr{args.rus_dominance_threshold}"
         if args.wandb_run_name:
             run_name = args.wandb_run_name
             
@@ -428,19 +451,57 @@ def main(args):
             mode="online" if not args.wandb_disabled else "disabled"
         )
     
-    device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-    print(f"Using device: {device}")
+    # Set up distributed training if requested
+    if args.distributed:
+        if 'LOCAL_RANK' not in os.environ:
+            raise ValueError("For distributed training, please launch with torchrun or python -m torch.distributed.launch")
+        
+        local_rank = int(os.environ['LOCAL_RANK'])
+        global_rank = int(os.environ.get('RANK', local_rank))
+        world_size = int(os.environ.get('WORLD_SIZE', 1))
+        
+        # Set device based on local_rank
+        device = torch.device(f'cuda:{local_rank}')
+        
+        # Initialize the process group
+        dist.init_process_group(backend='nccl')
+        
+        # Only print from rank 0
+        is_main_process = global_rank == 0
+        
+        if is_main_process:
+            print(f"Distributed training initialized with world_size: {world_size}")
+            print(f"Using device: {device}, rank: {global_rank}/{world_size-1}")
+    else:
+        # Non-distributed mode
+        if args.cuda_device >= 0 and torch.cuda.is_available() and not args.no_cuda:
+            cuda_count = torch.cuda.device_count()
+            if args.cuda_device >= cuda_count:
+                print(f"Warning: Requested GPU #{args.cuda_device} but only {cuda_count} GPUs available.")
+                print(f"Falling back to default CUDA device.")
+                device = torch.device("cuda")
+            else:
+                device = torch.device(f"cuda:{args.cuda_device}")
+                gpu_name = torch.cuda.get_device_name(args.cuda_device)
+                print(f"Using specific CUDA device: {device} (GPU #{args.cuda_device}: {gpu_name})")
+        else:
+            device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+            if device.type == "cuda":
+                gpu_name = torch.cuda.get_device_name(0)
+                print(f"Using default CUDA device: {device} ({gpu_name})")
+            else:
+                print(f"Using device: {device}")
+        is_main_process = True
 
+    # Set the random seeds
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if device == torch.device("cuda"):
-        torch.cuda.manual_seed_all(args.seed) # Use manual_seed_all for multi-GPU
-        # Consider deterministic algorithms, might impact performance
-        # torch.backends.cudnn.deterministic = True
-        # torch.backends.cudnn.benchmark = False
-
-    os.makedirs(args.output_dir, exist_ok=True)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(args.seed)
+    
+    if is_main_process:
+        os.makedirs(args.output_dir, exist_ok=True)
 
     # --- Load and Preprocess Data (Get full sensor list and activity map first) ---
     print("Loading initial data to determine sensors and activities...")
@@ -478,12 +539,12 @@ def main(args):
         print(f"An error occurred during initial data loading: {e}")
         sys.exit(1)
 
-    # --- Load RUS Data ---
     rus_file = args.rus_file_pattern.format(
         SUBJECT_ID=args.subject_id,
         MAX_LAG=args.rus_max_lag,
         BINS=args.rus_bins,
-        DOMINANCE_THRESHOLD=args.rus_dominance_threshold
+        DOMINANCE_THRESHOLD=args.rus_dominance_threshold,
+        DOMINANCE_PERCENTAGE=args.rus_dominance_percentage
     )
     try:
         rus_data_loaded = load_simplified_rus_data(rus_file, sensor_columns, args.seq_len)
@@ -495,7 +556,8 @@ def main(args):
          sys.exit(1)
 
     # --- Create Datasets and DataLoaders ---
-    print("Creating dataset...")
+    if is_main_process:
+        print("Creating dataset...")
     try:
         full_dataset = PamapWindowDataset(
             subject_id=args.subject_id,
@@ -507,49 +569,82 @@ def main(args):
             activity_map=activity_map
         )
     except Exception as e:
-         print(f"Error creating dataset: {e}")
+         if is_main_process:
+             print(f"Error creating dataset: {e}")
+         if args.distributed:
+             dist.destroy_process_group()
          sys.exit(1)
 
     if len(full_dataset) == 0:
-        print("Error: Dataset is empty after processing and windowing.")
+        if is_main_process:
+            print("Error: Dataset is empty after processing and windowing.")
+        if args.distributed:
+            dist.destroy_process_group()
         sys.exit(1)
 
     # Split dataset into training and validation sets
     val_size = int(len(full_dataset) * args.val_split)
     train_size = len(full_dataset) - val_size
     if train_size == 0 or val_size == 0:
-         print(f"Warning: Dataset size ({len(full_dataset)}) too small for split ({args.val_split}). Adjusting split.")
-         # Adjust split, e.g., ensure at least one sample in each
-         if len(full_dataset) > 1:
-             val_size = max(1, val_size)
-             train_size = len(full_dataset) - val_size
-         else: # Can't split
-             train_size = len(full_dataset)
-             val_size = 0
-             print("Warning: Cannot create validation set with only 1 sample.")
+         if is_main_process:
+             print(f"Warning: Dataset size ({len(full_dataset)}) too small for split ({args.val_split}). Adjusting split.")
+             # Adjust split, e.g., ensure at least one sample in each
+             if len(full_dataset) > 1:
+                 val_size = max(1, val_size)
+                 train_size = len(full_dataset) - val_size
+             else: # Can't split
+                 train_size = len(full_dataset)
+                 val_size = 0
+                 print("Warning: Cannot create validation set with only 1 sample.")
 
 
     generator = torch.Generator().manual_seed(args.seed) # Ensure reproducible split
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
 
-    print(f"Dataset split: Train={len(train_dataset)}, Validation={len(val_dataset)}")
+    if is_main_process:
+        print(f"Dataset split: Train={len(train_dataset)}, Validation={len(val_dataset)}")
+
+    # Create samplers for distributed training
+    if args.distributed:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=True,
+            seed=args.seed
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=False,
+            seed=args.seed
+        ) if val_size > 0 else None
+    else:
+        train_sampler = None
+        val_sampler = None
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),  # Don't shuffle if using DistributedSampler
+        sampler=train_sampler,
         num_workers=args.num_workers,
-        pin_memory=True if device == torch.device("cuda") else False
+        pin_memory=True if device.type == "cuda" else False
     )
+    
     # No shuffling for validation loader
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
+        sampler=val_sampler,
         num_workers=args.num_workers,
-        pin_memory=True if device == torch.device("cuda") else False
-    )
-    print("Dataloaders created.")
+        pin_memory=True if device.type == "cuda" else False
+    ) if val_size > 0 else []
+    
+    if is_main_process:
+        print("Dataloaders created.")
 
 
     # --- Model Configuration ---
@@ -573,7 +668,8 @@ def main(args):
         "router_config": moe_router_config,
     }
 
-    print("Initializing model...")
+    if is_main_process:
+        print("Initializing model...")
     model = TRUSMoEModel_LargeScale(
         input_dim=input_dim, # E_in = 1
         d_model=args.d_model,
@@ -587,12 +683,19 @@ def main(args):
         dropout=args.dropout,
         max_seq_len=num_modalities * args.seq_len # S = M * T
     ).to(device)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    
+    # Wrap model with DDP if using distributed training
+    if args.distributed:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+    
+    if is_main_process:
+        print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     task_criterion = nn.CrossEntropyLoss()
 
-    print("Starting training...")
+    if is_main_process:
+        print("Starting training...")
     best_val_accuracy = -1.0
     best_epoch = -1
 
@@ -602,18 +705,34 @@ def main(args):
         if len(val_loader) > 0:
              val_loss, val_acc = validate_epoch(model, val_loader, task_criterion, device, args, epoch)
 
-             # Simple best model saving based on validation accuracy
-             if val_acc > best_val_accuracy:
+             # For distributed training, all processes should have same val_acc after all-reduce
+             if args.distributed:
+                 val_acc_tensor = torch.tensor([val_acc], device=device)
+                 dist.all_reduce(val_acc_tensor, op=dist.ReduceOp.SUM)
+                 val_acc = val_acc_tensor.item() / dist.get_world_size()
+
+             # Simple best model saving based on validation accuracy (only main process saves)
+             if val_acc > best_val_accuracy and is_main_process:
                  best_val_accuracy = val_acc
                  best_epoch = epoch
+                 
+                 # Save best model
                  save_path = os.path.join(args.output_dir, f'best_model_subj{args.subject_id}.pth')
+                 
+                 # Save model state dict without DDP wrapper if distributed
+                 if args.distributed:
+                     model_to_save = model.module
+                 else:
+                     model_to_save = model
+                     
                  torch.save({
                      'epoch': epoch,
-                     'model_state_dict': model.state_dict(),
+                     'model_state_dict': model_to_save.state_dict(),
                      'optimizer_state_dict': optimizer.state_dict(),
                      'best_val_accuracy': best_val_accuracy,
                      'args': args # Save args for reference
                  }, save_path)
+                 
                  print(f"Epoch {epoch+1}: New best validation accuracy: {val_acc:.2f}%. Model saved to {save_path}")
                  
                  # Log best model to wandb if enabled
@@ -625,18 +744,27 @@ def main(args):
                          model_artifact.add_file(save_path)
                          wandb.log_artifact(model_artifact)
         else:
-             print(f"Epoch {epoch+1}: No validation set. Skipping validation and model saving.")
+             if is_main_process:
+                 print(f"Epoch {epoch+1}: No validation set. Skipping validation and model saving.")
 
+    # Synchronize processes before finishing
+    if args.distributed:
+        dist.barrier()
 
-    print("Training finished.")
-    if best_epoch != -1:
-        print(f"Best Validation Accuracy: {best_val_accuracy:.2f}% at epoch {best_epoch+1}")
-    else:
-        print("Training finished (no validation performed or no improvement).")
+    if is_main_process:
+        print("Training finished.")
+        if best_epoch != -1:
+            print(f"Best Validation Accuracy: {best_val_accuracy:.2f}% at epoch {best_epoch+1}")
+        else:
+            print("Training finished (no validation performed or no improvement).")
         
     # Finish wandb run
-    if args.use_wandb:
+    if args.use_wandb and (not args.distributed or (args.distributed and dist.get_rank() == 0)):
         wandb.finish()
+        
+    # Clean up distributed training
+    if args.distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == '__main__':
@@ -646,7 +774,7 @@ if __name__ == '__main__':
     parser.add_argument('--subject_id', type=int, default=1, help='Subject ID to train/validate on')
     parser.add_argument('--data_dir', type=str, default=DEFAULT_DATASET_DIR, help='Directory containing PAMAP2 .dat files')
     parser.add_argument('--sensor_prefix', type=str, default=None, help='Optional prefix to filter sensor columns (e.g., "acc", "gyro")')
-    parser.add_argument('--seq_len', type=int, default=100, help='Sequence length of time-series windows (T)') # PAMAP freq is 100Hz, so 100 = 1 second
+    parser.add_argument('--seq_len', type=int, default=100, help='Sequence length of R/U/S windows (T), if it is longer than the original time lag then repeat')
     parser.add_argument('--window_step', type=int, default=50, help='Step size for sliding window')
     parser.add_argument('--val_split', type=float, default=0.2, help='Fraction of data to use for validation')
 
@@ -654,7 +782,8 @@ if __name__ == '__main__':
     parser.add_argument('--rus_file_pattern', type=str, default=DEFAULT_RUS_FILE_PATTERN, help='Pattern for locating the .npy RUS file')
     parser.add_argument('--rus_max_lag', type=int, default=10, help='Max lag used when generating RUS file (part of filename)')
     parser.add_argument('--rus_bins', type=int, default=8, help='Bins used when generating RUS file (part of filename)')
-    parser.add_argument('--rus_dominance_threshold', type=float, default=0.3, help='Dominance threshold used when generating RUS file (part of filename)')
+    parser.add_argument('--rus_dominance_threshold', type=float, default=0.4, help='Dominance threshold used when generating RUS file (part of filename)')
+    parser.add_argument('--rus_dominance_percentage', type=int, default=90, help='Dominance percentage used when generating RUS file (part of filename)')
 
     # Model args (copied from trus_moe_model.py, adjust defaults if needed)
     parser.add_argument('--d_model', type=int, default=128, help='Internal dimension of the model')
@@ -704,6 +833,11 @@ if __name__ == '__main__':
     parser.add_argument('--wandb_disabled', action='store_true', help='Disable wandb even if --use_wandb is set (useful for debugging)')
     parser.add_argument('--wandb_log_model', action='store_true', help='Log best model as wandb artifact')
     parser.add_argument('--wandb_sweep', action='store_true', help='Enable hyperparameter sweep mode')
+
+    # Distributed training args
+    parser.add_argument('--distributed', action='store_true', help='Enable distributed training')
+
+    parser.add_argument('--cuda_device', type=int, default=-1, help='Specify which GPU to use when running in single-GPU mode')
 
     args = parser.parse_args()
     

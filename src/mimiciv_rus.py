@@ -6,8 +6,8 @@ import numpy as np
 import torch
 from temporal_pid import multi_lag_analysis
 
-DATASET_PATH = "/home/hhchung/MIMIC-IV-Data-Pipeline/XY_dl_data.pkl"
-MIMICIV_DITEMS_PATH = "/mnt/d64c1162-08cc-4571-90a3-04c60b6f6f66/hhchung/mimic-code/data/mimiciv/3.1/icu/d_items.csv.gz"
+DATASET_PATH = "/cis/home/xhan56/mimic-ts/XY_dl_data.pkl"
+MIMICIV_DITEMS_PATH = "/cis/home/xhan56/mimic-ts/d_items.csv.gz"
 OUTPUT_DIR = "../results/mimiciv"
 MAX_LAG = 6
 BINS = 8

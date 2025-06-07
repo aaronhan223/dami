@@ -14,7 +14,7 @@ import pdb
 # Define constants
 DATASET_DIR = "/cis/home/xhan56/pamap/PAMAP2_Dataset/Protocol"
 OUTPUT_DIR = "../results/pamap"
-SUBJECT_ID = 9
+SUBJECT_ID = 1
 MAX_LAG = 10
 BINS = 8
 DOMINANCE_THRESHOLD = 0.4 # Threshold for a PID term to be considered dominant
@@ -55,7 +55,6 @@ def preprocess_pamap_data(df):
         sensor_cols.insert(0, 'heart_rate')
     relevant_cols = essential_cols + sensor_cols
     df_processed = df[relevant_cols].copy()
-
     print(f"NaN counts before interpolation: {df_processed.isnull().sum()[df_processed.isnull().sum() > 0]}")
     df_processed = df_processed.interpolate(method='linear', limit_direction='both')
 
