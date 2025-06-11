@@ -415,7 +415,7 @@ def calculate_rus_losses(gating_probs: torch.Tensor,
     U = rus_values['U'] # (B, M, T)
     R = rus_values['R'] # (B, M, M, T)
     S = rus_values['S'] # (B, M, M, T)
-
+    import pdb
     gating_log_probs = F.log_softmax(gating_probs, dim=-1) # (B, M, T, N_exp)
     gating_log_probs_perm = gating_log_probs.permute(0, 2, 1, 3) # (B, T, M, N_exp)
 
@@ -423,6 +423,8 @@ def calculate_rus_losses(gating_probs: torch.Tensor,
     if M > 1:
         for m1 in range(M):
             for m2 in range(m1 + 1, M):
+                # TODO: look at the indicator and sum() to make it more fine-grained selection criteria
+                # TODO: is this a absolute threshold or a relative ratio (dominance)? I lean more towards absolute threshold, if so double check the log_probs_m1 and change the rus.py file to all pairs, the original dominance summary is only for analysis
                 indicator = (U[:, m1, :] > threshold_U) & (U[:, m2, :] > threshold_U) # (B, T)
                 if indicator.sum() > 0:
                     log_probs_m1 = gating_log_probs_perm[:, :, m1, :][indicator] # (N_valid, N_exp)

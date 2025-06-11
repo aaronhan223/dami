@@ -11,13 +11,23 @@ import matplotlib.pyplot as plt
 import itertools
 import pdb
 
-# Define constants
-DATASET_DIR = "/cis/home/xhan56/pamap/PAMAP2_Dataset/Protocol"
-OUTPUT_DIR = "../results/pamap"
-SUBJECT_ID = 1
-MAX_LAG = 10
-BINS = 8
-DOMINANCE_THRESHOLD = 0.4 # Threshold for a PID term to be considered dominant
+def parse_args():
+    parser = argparse.ArgumentParser(description='PAMAP2 dataset analysis with PID')
+    parser.add_argument('--dataset_dir', type=str, default="/cis/home/xhan56/pamap/PAMAP2_Dataset/Protocol",
+                        help='Directory containing PAMAP2 dataset files')
+    parser.add_argument('--output_dir', type=str, default="../results/pamap",
+                        help='Directory to save analysis results')
+    parser.add_argument('--subject_id', type=int, default=1,
+                        help='Subject ID to analyze (1-9)')
+    parser.add_argument('--max_lag', type=int, default=10,
+                        help='Maximum lag for temporal PID analysis')
+    parser.add_argument('--bins', type=int, default=8,
+                        help='Number of bins for discretization')
+    parser.add_argument('--dominance_threshold', type=float, default=0.4,
+                        help='Threshold for a PID term to be considered dominant')
+    parser.add_argument('--dominance_percentage', type=float, default=0.9,
+                        help='Percentage of lags a term must dominate to be considered dominant overall')
+    return parser.parse_args()
 
 def get_pamap_column_names():
     """Returns the standard column names for PAMAP2 dataset files."""
@@ -76,10 +86,12 @@ def preprocess_pamap_data(df):
 
 def main():
     """Main function to load, preprocess, and analyze PAMAP2 data."""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    args = parse_args()
+    
+    os.makedirs(args.output_dir, exist_ok=True)
 
     try:
-        df = load_pamap_data(SUBJECT_ID, DATASET_DIR)
+        df = load_pamap_data(args.subject_id, args.dataset_dir)
     except FileNotFoundError as e:
         print(e)
         sys.exit(1)
@@ -92,15 +104,15 @@ def main():
 
     Y = df_processed['activity_id'].values
 
-    if len(Y) <= MAX_LAG:
-        print(f"Error: Time series length ({len(Y)}) is not sufficient for max_lag ({MAX_LAG}). Aborting analysis.")
+    if len(Y) <= args.max_lag:
+        print(f"Error: Time series length ({len(Y)}) is not sufficient for max_lag ({args.max_lag}). Aborting analysis.")
         sys.exit(1)
 
     sensor_pairs = list(itertools.combinations(sensor_columns, 2))
     print(f"Generated {len(sensor_pairs)} pairs of sensor variables for analysis.")
 
     dominant_pid_results = [] # List to store results where a term is dominant
-    DOMINANCE_PERCENTAGE = 0.9  # 90% threshold for dominance across time lags
+    all_pid_results = [] # List to store results for all feature pairs
 
     for i, (col1, col2) in enumerate(sensor_pairs):
         print(f"\n--- Analyzing Pair {i+1}/{len(sensor_pairs)}: {col1} vs {col2} --- ")
@@ -112,20 +124,20 @@ def main():
             print(f"Len X1: {len(X1)}, Len X2: {len(X2)}, Len Y: {len(Y)}")
             continue
 
-        print(f"Starting Temporal PID analysis for Subject {SUBJECT_ID}...")
+        print(f"Starting Temporal PID analysis for Subject {args.subject_id}...")
         print(f"X1: {col1} ({len(X1)} samples)")
         print(f"X2: {col2} ({len(X2)} samples)")
         print(f"Y: activity_id ({len(Y)} samples)")
-        print(f"Max Lag: {MAX_LAG}, Bins: {BINS}")
+        print(f"Max Lag: {args.max_lag}, Bins: {args.bins}")
 
         try:
-            pid_results = multi_lag_analysis(X1, X2, Y, max_lag=MAX_LAG, bins=BINS)
+            pid_results = multi_lag_analysis(X1, X2, Y, max_lag=args.max_lag, bins=args.bins)
         except Exception as e:
             print(f"Error during PID analysis for pair ({col1}, {col2}): {e}")
             continue
 
         # --- Analyze dominance across all lags as a unit ---
-        lags = pid_results.get('lag', range(MAX_LAG + 1))
+        lags = pid_results.get('lag', range(args.max_lag + 1))
         dominant_counts = {'R': 0, 'U1': 0, 'U2': 0, 'S': 0}
         total_valid_lags = 0
         
@@ -159,7 +171,7 @@ def main():
                     max_value = norm_values[max_term]
                     
                     # If highest and above threshold, count it
-                    if max_value > DOMINANCE_THRESHOLD:
+                    if max_value > args.dominance_threshold:
                         dominant_counts[max_term] += 1
                     
                     # Store this lag's result
@@ -184,26 +196,33 @@ def main():
         
         # Check if we have enough valid lags to evaluate
         if total_valid_lags > 0:
-            # Find term that is dominant across at least 90% of the lags
+            # Calculate average metrics across all lags
+            avg_metrics = {
+                'R_value': np.mean([r['R_value'] for r in lag_results]),
+                'U1_value': np.mean([r['U1_value'] for r in lag_results]),
+                'U2_value': np.mean([r['U2_value'] for r in lag_results]), 
+                'S_value': np.mean([r['S_value'] for r in lag_results]),
+                'MI_value': np.mean([r['MI_value'] for r in lag_results]),
+                'R_norm': np.mean([r['R_norm'] for r in lag_results]),
+                'U1_norm': np.mean([r['U1_norm'] for r in lag_results]),
+                'U2_norm': np.mean([r['U2_norm'] for r in lag_results]),
+                'S_norm': np.mean([r['S_norm'] for r in lag_results])
+            }
+            
+            # Save results for all feature pairs
+            all_pid_results.append({
+                'feature_pair': (col1, col2),
+                'avg_metrics': avg_metrics,
+                'lag_results': lag_results
+            })
+            
+            # Find term that is dominant across at least percentage of the lags
             for term, count in dominant_counts.items():
                 dominance_ratio = count / total_valid_lags
-                if dominance_ratio >= DOMINANCE_PERCENTAGE:
+                if dominance_ratio >= args.dominance_percentage:
                     print(f"Found dominant term {term} for pair ({col1}, {col2}) across {dominance_ratio:.1%} of lags")
                     
-                    # Calculate average metrics across all lags
-                    avg_metrics = {
-                        'R_value': np.mean([r['R_value'] for r in lag_results]),
-                        'U1_value': np.mean([r['U1_value'] for r in lag_results]),
-                        'U2_value': np.mean([r['U2_value'] for r in lag_results]), 
-                        'S_value': np.mean([r['S_value'] for r in lag_results]),
-                        'MI_value': np.mean([r['MI_value'] for r in lag_results]),
-                        'R_norm': np.mean([r['R_norm'] for r in lag_results]),
-                        'U1_norm': np.mean([r['U1_norm'] for r in lag_results]),
-                        'U2_norm': np.mean([r['U2_norm'] for r in lag_results]),
-                        'S_norm': np.mean([r['S_norm'] for r in lag_results])
-                    }
-                    
-                    # Store this pair's result
+                    # Store this pair's result as dominant
                     dominant_pid_results.append({
                         'feature_pair': (col1, col2),
                         'dominant_term': term,
@@ -217,11 +236,11 @@ def main():
         # --- Commented out plotting ---
         # sanitized_col1 = col1.replace('_', '-').replace('.', '')
         # sanitized_col2 = col2.replace('_', '-').replace('.', '')
-        # plot_filename = f'pamap_subject{SUBJECT_ID}_pid_{sanitized_col1}_vs_{sanitized_col2}_lag{MAX_LAG}_bins{BINS}.png'
-        # plot_save_path = os.path.join(OUTPUT_DIR, plot_filename)
+        # plot_filename = f'pamap_subject{args.subject_id}_pid_{sanitized_col1}_vs_{sanitized_col2}_lag{args.max_lag}_bins{args.bins}.png'
+        # plot_save_path = os.path.join(args.output_dir, plot_filename)
         # print(f"Plotting results to {plot_save_path}...")
         # try:
-        #     plot_multi_lag_results(pid_results, title=f'PID: {col1} vs {col2} (Subject {SUBJECT_ID})', save_path=plot_save_path)
+        #     plot_multi_lag_results(pid_results, title=f'PID: {col1} vs {col2} (Subject {args.subject_id})', save_path=plot_save_path)
         # except Exception as e:
         #     print(f"Error plotting results for pair ({col1}, {col2}): {e}")
         # finally:
@@ -231,13 +250,22 @@ def main():
 
     # --- Save dominant PID results ---
     if dominant_pid_results:
-        output_filename = f'pamap_subject{SUBJECT_ID}_lag{MAX_LAG}_bins{BINS}_thresh{DOMINANCE_THRESHOLD:.1f}_pct{int(DOMINANCE_PERCENTAGE*100)}.npy'
-        output_path = os.path.join(OUTPUT_DIR, output_filename)
+        output_filename = f'pamap_subject{args.subject_id}_dominant_lag{args.max_lag}_bins{args.bins}_thresh{args.dominance_threshold:.1f}_pct{int(args.dominance_percentage*100)}.npy'
+        output_path = os.path.join(args.output_dir, output_filename)
         print(f"Saving {len(dominant_pid_results)} dominant PID results to {output_path}...")
         np.save(output_path, dominant_pid_results, allow_pickle=True) # Need allow_pickle=True for list of dicts
-        print("Saving complete.")
+        print("Saving dominant pairs complete.")
 
-        # --- Print summary of dominant terms ---
+    # --- Save all PID results ---
+    if all_pid_results:
+        all_output_filename = f'pamap_subject{args.subject_id}_all_lag{args.max_lag}_bins{args.bins}.npy'
+        all_output_path = os.path.join(args.output_dir, all_output_filename)
+        print(f"Saving {len(all_pid_results)} PID results for all feature pairs to {all_output_path}...")
+        np.save(all_output_path, all_pid_results, allow_pickle=True)
+        print("Saving all pairs complete.")
+
+    # --- Print summary of dominant terms ---
+    if dominant_pid_results:
         dominance_counts = {'R': 0, 'U1': 0, 'U2': 0, 'S': 0}
         for result in dominant_pid_results:
             term = result.get('dominant_term')

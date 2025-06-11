@@ -28,20 +28,20 @@ except ImportError as e:
 
 
 DEFAULT_DATASET_DIR = "/cis/home/xhan56/pamap/PAMAP2_Dataset/Protocol"
-DEFAULT_RUS_FILE_PATTERN = "../results/pamap/pamap_subject{SUBJECT_ID}_lag{MAX_LAG}_bins{BINS}_thresh{DOMINANCE_THRESHOLD:.1f}_pct{DOMINANCE_PERCENTAGE}.npy"
+DEFAULT_RUS_FILE_PATTERN = "../results/pamap/pamap_subject{SUBJECT_ID}_all_lag{MAX_LAG}_bins{BINS}.npy"
 DEFAULT_OUTPUT_DIR = "../results/pamap_training"
 
 
 def load_simplified_rus_data(rus_filepath: str, sensor_columns: List[str], seq_len: int) -> Dict[str, torch.Tensor]:
     """
-    Loads the pre-computed dominant RUS terms from the .npy file and creates
+    Loads the pre-computed RUS terms from the .npy file and creates
     tensors with full RUS quantities across time lags.
 
     This function loads data saved by pamap_rus.py which contains detailed
-    lag-specific information for each feature pair that meets dominance criteria.
+    lag-specific information for all feature pairs.
 
     Args:
-        rus_filepath: Path to the .npy file containing dominant PID results.
+        rus_filepath: Path to the .npy file containing PID results.
         sensor_columns: List of sensor names (modalities).
         seq_len: The sequence length (T) for the tensors.
 
@@ -56,7 +56,7 @@ def load_simplified_rus_data(rus_filepath: str, sensor_columns: List[str], seq_l
         raise FileNotFoundError(f"RUS data file not found: {rus_filepath}")
 
     print(f"Loading RUS data from: {rus_filepath}")
-    dominant_pid_results = np.load(rus_filepath, allow_pickle=True)
+    all_pid_results = np.load(rus_filepath, allow_pickle=True)
 
     M = len(sensor_columns)
     T = seq_len
@@ -70,9 +70,8 @@ def load_simplified_rus_data(rus_filepath: str, sensor_columns: List[str], seq_l
     # Track which pairs we've processed
     processed_pairs = set()
 
-    for result in dominant_pid_results:
+    for result in all_pid_results:
         col1, col2 = result['feature_pair']
-        dominant_term = result['dominant_term']
         
         if col1 not in sensor_to_idx or col2 not in sensor_to_idx:
             print(f"Warning: Sensor pair ({col1}, {col2}) from RUS file not in selected sensor columns. Skipping.")
@@ -109,16 +108,15 @@ def load_simplified_rus_data(rus_filepath: str, sensor_columns: List[str], seq_l
                 break
                 
             # Fill in the RUS values for this segment
-            if dominant_term == 'R':
-                R[m1, m2, start_idx:end_idx] = lag_data['R_value']
-                R[m2, m1, start_idx:end_idx] = lag_data['R_value']
-            elif dominant_term == 'S':
-                S[m1, m2, start_idx:end_idx] = lag_data['S_value']
-                S[m2, m1, start_idx:end_idx] = lag_data['S_value']
-            elif dominant_term == 'U1':
-                U[m1, start_idx:end_idx] = lag_data['U1_value']
-            elif dominant_term == 'U2':
-                U[m2, start_idx:end_idx] = lag_data['U2_value']
+            # Now we use all values instead of just the dominant term
+            R[m1, m2, start_idx:end_idx] = lag_data['R_value']
+            R[m2, m1, start_idx:end_idx] = lag_data['R_value']
+            
+            S[m1, m2, start_idx:end_idx] = lag_data['S_value']
+            S[m2, m1, start_idx:end_idx] = lag_data['S_value']
+            
+            U[m1, start_idx:end_idx] = lag_data['U1_value']
+            U[m2, start_idx:end_idx] = lag_data['U2_value']
 
     print(f"RUS data loaded. Shapes: U({U.shape}), R({R.shape}), S({S.shape})")
     print(f"  Average R value: {R.mean().item():.4f}")
@@ -439,7 +437,7 @@ def main(args):
     # Initialize wandb if enabled - only on main process if distributed
     if args.use_wandb and (not args.distributed or (args.distributed and dist.get_rank() == 0)):
         wandb_config = {k: v for k, v in vars(args).items()}
-        run_name = f"subj{args.subject_id}_seq{args.seq_len}_moe{args.num_moe_layers}_thr{args.rus_dominance_threshold}"
+        run_name = f"subj{args.subject_id}_seq{args.seq_len}_moe{args.num_moe_layers}_lag{args.rus_max_lag}_bins{args.rus_bins}_thr{args.threshold_u}_{args.threshold_r}_{args.threshold_s}_lambda{args.lambda_u}_{args.lambda_r}_{args.lambda_s}_{args.lambda_load}"
         if args.wandb_run_name:
             run_name = args.wandb_run_name
             
@@ -539,21 +537,20 @@ def main(args):
         print(f"An error occurred during initial data loading: {e}")
         sys.exit(1)
 
+    # Format the RUS file path with the appropriate parameters
     rus_file = args.rus_file_pattern.format(
         SUBJECT_ID=args.subject_id,
         MAX_LAG=args.rus_max_lag,
-        BINS=args.rus_bins,
-        DOMINANCE_THRESHOLD=args.rus_dominance_threshold,
-        DOMINANCE_PERCENTAGE=args.rus_dominance_percentage
+        BINS=args.rus_bins
     )
-    try:
-        rus_data_loaded = load_simplified_rus_data(rus_file, sensor_columns, args.seq_len)
-    except FileNotFoundError as e:
-        print(f"Error: {e}. Check RUS file path pattern and parameters.")
-        sys.exit(1)
-    except Exception as e:
-         print(f"An error occurred loading RUS data: {e}")
-         sys.exit(1)
+    # try:
+    rus_data_loaded = load_simplified_rus_data(rus_file, sensor_columns, args.seq_len)
+    # except FileNotFoundError as e:
+    #     print(f"Error: {e}. Check RUS file path pattern and parameters.")
+    #     sys.exit(1)
+    # except Exception as e:
+    #      print(f"An error occurred loading RUS data: {e}")
+    #      sys.exit(1)
 
     # --- Create Datasets and DataLoaders ---
     if is_main_process:
@@ -782,8 +779,8 @@ if __name__ == '__main__':
     parser.add_argument('--rus_file_pattern', type=str, default=DEFAULT_RUS_FILE_PATTERN, help='Pattern for locating the .npy RUS file')
     parser.add_argument('--rus_max_lag', type=int, default=10, help='Max lag used when generating RUS file (part of filename)')
     parser.add_argument('--rus_bins', type=int, default=8, help='Bins used when generating RUS file (part of filename)')
-    parser.add_argument('--rus_dominance_threshold', type=float, default=0.4, help='Dominance threshold used when generating RUS file (part of filename)')
-    parser.add_argument('--rus_dominance_percentage', type=int, default=90, help='Dominance percentage used when generating RUS file (part of filename)')
+    # parser.add_argument('--rus_dominance_threshold', type=float, default=0.4, help='Dominance threshold used when generating RUS file (part of filename)')
+    # parser.add_argument('--rus_dominance_percentage', type=int, default=90, help='Dominance percentage used when generating RUS file (part of filename)')
 
     # Model args (copied from trus_moe_model.py, adjust defaults if needed)
     parser.add_argument('--d_model', type=int, default=128, help='Internal dimension of the model')
@@ -816,13 +813,13 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', type=str, default=DEFAULT_OUTPUT_DIR, help='Directory to save results/models')
 
     # Loss args
-    parser.add_argument('--threshold_u', type=float, default=0.7, help='Threshold for uniqueness loss (applied to simplified binary U)')
-    parser.add_argument('--threshold_r', type=float, default=0.7, help='Threshold for redundancy loss (applied to simplified binary R)')
-    parser.add_argument('--threshold_s', type=float, default=0.7, help='Threshold for synergy loss (applied to simplified binary S)')
-    parser.add_argument('--lambda_u', type=float, default=0.01, help='Weight for uniqueness loss')
-    parser.add_argument('--lambda_r', type=float, default=0.01, help='Weight for redundancy loss')
-    parser.add_argument('--lambda_s', type=float, default=0.01, help='Weight for synergy loss')
-    parser.add_argument('--lambda_load', type=float, default=0.01, help='Weight for load balancing loss')
+    parser.add_argument('--threshold_u', type=float, default=0.5, help='Threshold for uniqueness loss (applied to simplified binary U)')
+    parser.add_argument('--threshold_r', type=float, default=0.5, help='Threshold for redundancy loss (applied to simplified binary R)')
+    parser.add_argument('--threshold_s', type=float, default=0.5, help='Threshold for synergy loss (applied to simplified binary S)')
+    parser.add_argument('--lambda_u', type=float, default=0.1, help='Weight for uniqueness loss')
+    parser.add_argument('--lambda_r', type=float, default=0.1, help='Weight for redundancy loss')
+    parser.add_argument('--lambda_s', type=float, default=0.1, help='Weight for synergy loss')
+    parser.add_argument('--lambda_load', type=float, default=0.1, help='Weight for load balancing loss')
     parser.add_argument('--epsilon_loss', type=float, default=1e-8, help='Epsilon for stability in loss calculations')
 
     # Wandb args
@@ -837,7 +834,7 @@ if __name__ == '__main__':
     # Distributed training args
     parser.add_argument('--distributed', action='store_true', help='Enable distributed training')
 
-    parser.add_argument('--cuda_device', type=int, default=-1, help='Specify which GPU to use when running in single-GPU mode')
+    parser.add_argument('--cuda_device', type=int, default=0, help='Specify which GPU to use when running in single-GPU mode')
 
     args = parser.parse_args()
     
