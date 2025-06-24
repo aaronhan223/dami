@@ -103,6 +103,7 @@ def main():
     medschart_pairs = list(itertools.combinations(range(len(selected_medschart_column_names)), 2))
 
     dominant_pid_results = []
+    all_pid_results = []
 
     for i, (idx1, idx2) in enumerate(medschart_pairs):
         col1 = selected_medschart_column_names[idx1]
@@ -128,7 +129,7 @@ def main():
             print(f"Error during PID analysis for pair ({col1}, {col2}): {e}")
             continue
 
-        # --- Check for dominance and collect results ---
+        # --- Store all PID results ---
         lags = pid_results.get('lag', range(MAX_LAG + 1)) # Assuming pid_results has 'lag' key or default to range
         for lag_idx, lag in enumerate(lags):
             try:
@@ -138,6 +139,18 @@ def main():
                 s = pid_results['synergy'][lag_idx]
                 mi = pid_results['total_di'][lag_idx]
 
+                # Store all results regardless of dominance
+                all_pid_results.append({
+                    'feature_pair': (col1, col2),
+                    'lag': lag,
+                    'R_value': r,
+                    'U1_value': u1,
+                    'U2_value': u2,
+                    'S_value': s,
+                    'MI_value': mi
+                })
+
+                # --- Check for dominance and collect dominant results for summary ---
                 if mi > 1e-9: # Avoid division by zero or near-zero MI
                     dominant_term = None
                     if r / mi > DOMINANCE_THRESHOLD:
@@ -169,13 +182,21 @@ def main():
 
     print(f"\nAnalysis complete for all {len(medschart_pairs)} pairs.")
 
+    # --- Save all PID results ---
+    if all_pid_results:
+        all_output_filename = f'mimiciv_all_rus_lag{MAX_LAG}_bins{BINS}.npy'
+        all_output_path = os.path.join(OUTPUT_DIR, all_output_filename)
+        print(f"Saving {len(all_pid_results)} total PID results to {all_output_path}...")
+        np.save(all_output_path, all_pid_results, allow_pickle=True) # Need allow_pickle=True for list of dicts
+        print("Saving all results complete.")
+
     # --- Save dominant PID results ---
     if dominant_pid_results:
-        output_filename = f'mimiciv_lag{MAX_LAG}_bins{BINS}_thresh{DOMINANCE_THRESHOLD:.1f}.npy'
+        output_filename = f'mimiciv_dominant_lag{MAX_LAG}_bins{BINS}_thresh{DOMINANCE_THRESHOLD:.1f}.npy'
         output_path = os.path.join(OUTPUT_DIR, output_filename)
         print(f"Saving {len(dominant_pid_results)} dominant PID results to {output_path}...")
         np.save(output_path, dominant_pid_results, allow_pickle=True) # Need allow_pickle=True for list of dicts
-        print("Saving complete.")
+        print("Saving dominant results complete.")
 
         # --- Print summary of dominant terms ---
         dominance_counts = {'R': 0, 'U1': 0, 'U2': 0, 'S': 0}
@@ -192,6 +213,8 @@ def main():
 
     else:
         print("No dominant PID terms found with the current threshold.")
+
+    print(f"Total RUS computations saved: {len(all_pid_results)}")
 
 if __name__ == "__main__":
     main()
