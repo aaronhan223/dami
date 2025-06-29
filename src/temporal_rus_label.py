@@ -92,6 +92,7 @@ def solve_Q_label(P: np.ndarray):
     # Convert to numpy array
     return np.stack([q.value for q in Q], axis=2)
 
+
 def CoI_label(P: np.ndarray):
     """
     Calculate co-information (redundancy) from classification distribution.
@@ -117,6 +118,7 @@ def CoI_label(P: np.ndarray):
     
     # I(Y; X1; X2)
     return MI(A) + MI(B) - MI(C)
+
 
 def UI_label(P, cond_id=0):
     """
@@ -155,6 +157,7 @@ def UI_label(P, cond_id=0):
 
     return sum_val
 
+
 def CI_label(P, Q):
     """
     Calculate synergistic information from classification distributions.
@@ -181,198 +184,148 @@ def CI_label(P, Q):
     # Calculate total MI in P minus total MI in Q (synergy)
     return MI(P_) - MI(Q_)
 
-def create_temporal_distribution_label(X1, X2, Y, lag=1, window_size=5, bins=10):
+
+def create_temporal_distribution_label_multi(X1_list, X2_list, Y_list, n_labels=None, lag=1, bins=10):
     """
-    Create a joint probability distribution from time series data at a specific temporal lag.
+    Create a joint probability distribution from multiple time series with different labels.
     
-    This function creates features from data at time t-lag to predict label Y.
+    This function processes multiple sequences, each with its own label, and creates
+    a joint distribution P(X1_past, X2_past, Y_label) using data at lag positions.
     
     Parameters:
     -----------
-    X1, X2 : numpy.ndarray
-        Univariate time series data (1D array of shape (seq_length,))
-    Y : int or float
-        Classification label (scalar)
+    X1_list, X2_list : list of numpy.ndarray
+        List of time series, one per sequence
+    Y_list : list or numpy.ndarray
+        Classification labels for each sequence
+    n_labels : int, optional
+        Expected number of distinct labels. If None, inferred from Y_list
     lag : int, default=1
         Temporal lag to consider (how many time steps back)
-    window_size : int, default=5
-        Size of temporal window ending at t-lag
     bins : int, default=10
-        Number of bins for discretization
+        Number of bins for discretization of X1 and X2
         
     Returns:
     --------
     P : numpy.ndarray
-        3D array of joint probability distribution P(X1_t-lag, X2_t-lag, Y_label)
+        3D array of joint probability distribution P(X1_past, X2_past, Y_label)
     """
-    # Ensure X1 and X2 are 1D arrays
-    X1 = np.asarray(X1).flatten()
-    X2 = np.asarray(X2).flatten()
+    # Ensure inputs are lists
+    if not isinstance(X1_list, list):
+        X1_list = [X1_list]
+    if not isinstance(X2_list, list):
+        X2_list = [X2_list]
+    if not isinstance(Y_list, (list, np.ndarray)):
+        Y_list = [Y_list]
     
-    seq_length = len(X1)
-    assert len(X2) == seq_length, "X1 and X2 must have the same length"
+    # Convert Y_list to numpy array for easier processing
+    Y_array = np.array(Y_list)
     
-    # For a single sequence, we create multiple samples by sliding windows
-    # Each window position creates a sample with its corresponding label Y
-    X1_windows = []
-    X2_windows = []
-    Y_labels = []
+    # Check for distinct labels
+    unique_labels = np.unique(Y_array)
+    actual_n_labels = len(unique_labels)
     
-    # Generate samples by sliding window approach
-    for end_pos in range(window_size, seq_length + 1):
-        if lag >= end_pos:
-            continue  # Skip if lag is too large for this position
-            
-        # Extract window ending at position (end_pos - lag)
-        actual_end = end_pos - lag
-        actual_start = max(0, actual_end - window_size)
+    if n_labels is None:
+        n_labels = actual_n_labels
+    else:
+        # Ensure n_labels is at least as large as actual number of unique labels
+        n_labels = max(n_labels, actual_n_labels)
+    
+    # Warn if we have a degenerate case (only one label)
+    if actual_n_labels == 1:
+        print(f"Warning: Only one unique label found ({unique_labels[0]}). "
+              f"This may lead to degenerate distributions. Consider providing multiple classes.")
+    
+    # Collect all data points
+    all_X1_data = []
+    all_X2_data = []
+    all_Y_labels = []
+    
+    # Process each sequence
+    for X1, X2, Y in zip(X1_list, X2_list, Y_list):
+        X1 = np.asarray(X1).flatten()
+        X2 = np.asarray(X2).flatten()
         
-        if actual_end > actual_start:
-            X1_window = X1[actual_start:actual_end]
-            X2_window = X2[actual_start:actual_end]
+        if len(X1) != len(X2):
+            raise ValueError("X1 and X2 must have the same length")
+        
+        # For each sequence, extract data at lag position
+        if lag == 0:
+            X1_past = X1
+            X2_past = X2
+        else:
+            X1_past = X1[:-lag]
+            X2_past = X2[:-lag]
+        
+        # Skip if no data after lag
+        if len(X1_past) == 0:
+            continue
             
-            # Use mean of window as feature
-            X1_feat = np.mean(X1_window)
-            X2_feat = np.mean(X2_window)
-            
-            X1_windows.append(X1_feat)
-            X2_windows.append(X2_feat)
-            Y_labels.append(Y)
+        # Add data from this sequence
+        all_X1_data.extend(X1_past)
+        all_X2_data.extend(X2_past)
+        # Each point is associated with the sequence's label
+        all_Y_labels.extend([Y] * len(X1_past))
     
-    if len(X1_windows) == 0:
-        # If no valid windows, create a minimal distribution
-        P = np.zeros((bins, bins, 2))  # 2 classes as default
-        P[0, 0, 0] = 1.0  # Put all probability mass in one cell
+    if len(all_X1_data) == 0:
+        # Create a minimal uniform distribution if no data
+        P = np.ones((bins, bins, n_labels)) / (bins * bins * n_labels)
         return P
     
-    X1_features = np.array(X1_windows)
-    X2_features = np.array(X2_windows)
-    Y_array = np.array(Y_labels)
+    # Convert to arrays
+    X1_data = np.array(all_X1_data)
+    X2_data = np.array(all_X2_data)
+    Y_data = np.array(all_Y_labels)
     
-    # Discretize features
-    if len(np.unique(X1_features)) > 1:
-        X1_edges = np.linspace(np.min(X1_features), np.max(X1_features), bins + 1)
+    # Discretize X1 and X2 data (same logic as temporal_pid.py)
+    if not np.array_equal(X1_data, X1_data.astype(int)) or not np.array_equal(X2_data, X2_data.astype(int)):
+        # Continuous data
+        x1_edges = np.linspace(np.min(X1_data), np.max(X1_data), bins + 1)
+        x2_edges = np.linspace(np.min(X2_data), np.max(X2_data), bins + 1)
+        
+        x1_bins = np.digitize(X1_data, x1_edges) - 1
+        x2_bins = np.digitize(X2_data, x2_edges) - 1
+        
+        x1_bins = np.clip(x1_bins, 0, bins - 1)
+        x2_bins = np.clip(x2_bins, 0, bins - 1)
     else:
-        # If all values are the same, create uniform bins around that value
-        val = X1_features[0]
-        X1_edges = np.linspace(val - 1, val + 1, bins + 1)
+        # Already discrete
+        x1_bins = X1_data
+        x2_bins = X2_data
+        
+        # Remap to contiguous integers
+        x1_unique = np.unique(x1_bins)
+        x2_unique = np.unique(x2_bins)
+        
+        x1_map = {val: i for i, val in enumerate(x1_unique)}
+        x2_map = {val: i for i, val in enumerate(x2_unique)}
+        
+        x1_bins = np.array([x1_map[val] for val in x1_bins])
+        x2_bins = np.array([x2_map[val] for val in x2_bins])
+        
+        bins = max(len(x1_unique), len(x2_unique))
     
-    if len(np.unique(X2_features)) > 1:
-        X2_edges = np.linspace(np.min(X2_features), np.max(X2_features), bins + 1)
-    else:
-        val = X2_features[0]
-        X2_edges = np.linspace(val - 1, val + 1, bins + 1)
+    # Handle Y labels (already discrete)
+    # Create label mapping to ensure contiguous indices starting from 0
+    label_map = {label: idx for idx, label in enumerate(sorted(unique_labels))}
+    y_bins = np.array([label_map[label] for label in Y_data])
     
-    X1_disc = np.digitize(X1_features, X1_edges) - 1
-    X2_disc = np.digitize(X2_features, X2_edges) - 1
-    
-    # Ensure values are within bins range
-    X1_disc = np.clip(X1_disc, 0, bins - 1)
-    X2_disc = np.clip(X2_disc, 0, bins - 1)
-    
-    # For single label, we need to create a distribution that captures
-    # the relationship between temporal features and the label
-    # We'll use binary encoding: label present (1) or not (0)
-    n_labels = 2  # Binary: label matches Y or not
-    
-    # Create joint probability distribution P(X1_lag, X2_lag, Y)
+    # Create joint probability distribution
     P = np.zeros((bins, bins, n_labels))
     
-    for i in range(len(X1_disc)):
-        # All windows have the same label Y, so they all go to class 1
-        P[X1_disc[i], X2_disc[i], 1] += 1
+    # Build histogram
+    for i in range(len(x1_bins)):
+        P[x1_bins[i], x2_bins[i], y_bins[i]] += 1
     
-    # Add some probability mass to class 0 to avoid degenerate distributions
-    # This represents the "background" or "no label" case
-    total_samples = len(X1_disc)
-    for i in range(min(total_samples, bins)):
-        for j in range(min(total_samples, bins)):
-            P[i, j, 0] += 0.1
+    # Add small pseudocount to avoid zero probabilities (optional, for numerical stability)
+    epsilon = 1e-10
+    P = P + epsilon
     
-    # Normalize to get probability distribution
+    # Normalize
     P = P / np.sum(P)
     
     return P
 
-def temporal_pid_label_sequence(X1, X2, Y, max_lag=None, window_size=5, bins=10):
-    """
-    Compute temporal sequences of PID components for time series classification.
-    
-    This function computes how RUS quantities change over different temporal lags,
-    showing which parts of the time series are most informative for classification.
-    
-    Parameters:
-    -----------
-    X1, X2 : numpy.ndarray
-        Univariate time series data (1D array of shape (seq_length,))
-    Y : int or float
-        Classification label (scalar)
-    max_lag : int, optional
-        Maximum temporal lag to analyze. If None, uses seq_length - window_size
-    window_size : int, default=5
-        Size of temporal window for feature extraction
-    bins : int, default=10
-        Number of bins for discretization
-        
-    Returns:
-    --------
-    results : dict
-        Dictionary containing:
-        - 'lags': array of lag values
-        - 'redundancy': array of redundancy values at each lag
-        - 'unique_x1': array of unique X1 information at each lag
-        - 'unique_x2': array of unique X2 information at each lag
-        - 'synergy': array of synergy values at each lag
-        - 'total_mi': array of total mutual information at each lag
-    """
-    # Ensure X1 and X2 are 1D arrays
-    X1 = np.asarray(X1).flatten()
-    X2 = np.asarray(X2).flatten()
-    
-    seq_length = len(X1)
-    
-    if max_lag is None:
-        max_lag = seq_length - window_size
-    
-    results = {
-        'lags': [],
-        'redundancy': [],
-        'unique_x1': [],
-        'unique_x2': [],
-        'synergy': [],
-        'total_mi': []
-    }
-    
-    # Compute PID for each lag
-    for lag in range(max_lag + 1):
-        # Create probability distribution for this lag
-        P = create_temporal_distribution_label(X1, X2, Y, lag, window_size, bins)
-        
-        # Optimize to get Q
-        Q = solve_Q_label(P)
-        
-        # Calculate PID components
-        redundancy = CoI_label(Q)
-        unique_x1 = UI_label(Q, cond_id=1)
-        unique_x2 = UI_label(Q, cond_id=0)
-        synergy = CI_label(P, Q)
-        
-        # Calculate total mutual information
-        total_mi = MI(P.transpose([2, 0, 1]).reshape((P.shape[2], P.shape[0]*P.shape[1])))
-        
-        # Store results
-        results['lags'].append(lag)
-        results['redundancy'].append(redundancy)
-        results['unique_x1'].append(unique_x1)
-        results['unique_x2'].append(unique_x2)
-        results['synergy'].append(synergy)
-        results['total_mi'].append(total_mi)
-    
-    # Convert to numpy arrays
-    for key in results:
-        results[key] = np.array(results[key])
-    
-    return results
 
 def plot_temporal_rus_sequences(results, title=None, save_path=None):
     """
@@ -460,6 +413,7 @@ def plot_temporal_rus_sequences(results, title=None, save_path=None):
     else:
         plt.show()
 
+
 def generate_synthetic_classification_data(seq_length=50, class_label=0, noise_level=0.1, seed=None):
     """
     Generate synthetic time series data with a classification label.
@@ -512,6 +466,7 @@ def generate_synthetic_classification_data(seq_length=50, class_label=0, noise_l
     
     return X1, X2, class_label
 
+
 def plot_synthetic_data(X1, X2, Y, save_path=None):
     """
     Plot the synthetic time series data.
@@ -553,6 +508,103 @@ def plot_synthetic_data(X1, X2, Y, save_path=None):
     else:
         plt.show()
 
+
+def temporal_pid_label_multi_sequence(X1_list, X2_list, Y_list, max_lag=None, bins=10):
+    """
+    Compute temporal PID components for multiple time series with different class labels.
+    
+    This function analyzes how information components change over different temporal lags
+    when considering multiple sequences from different classes together.
+    
+    Parameters:
+    -----------
+    X1_list, X2_list : list of numpy.ndarray
+        Lists of time series, one per sequence
+    Y_list : list or numpy.ndarray
+        Classification labels for each sequence
+    max_lag : int, optional
+        Maximum temporal lag to analyze. If None, uses minimum sequence length - 1
+    bins : int, default=10
+        Number of bins for discretization
+        
+    Returns:
+    --------
+    results : dict
+        Dictionary containing PID components at each lag
+    """
+    # Ensure inputs are lists
+    if not isinstance(X1_list, list):
+        X1_list = [X1_list]
+    if not isinstance(X2_list, list):
+        X2_list = [X2_list]
+    if not isinstance(Y_list, (list, np.ndarray)):
+        Y_list = [Y_list]
+    
+    # Check that all lists have the same length
+    if not (len(X1_list) == len(X2_list) == len(Y_list)):
+        raise ValueError("X1_list, X2_list, and Y_list must have the same length")
+    
+    # Find minimum sequence length if max_lag not specified
+    if max_lag is None:
+        min_length = min(len(X1) for X1 in X1_list)
+        max_lag = min_length - 1
+    
+    # Get unique labels
+    unique_labels = np.unique(Y_list)
+    n_labels = len(unique_labels)
+    
+    if n_labels < 2:
+        print(f"Warning: Only {n_labels} unique label(s) found. "
+              f"PID analysis works best with multiple classes.")
+    
+    results = {
+        'lags': [],
+        'redundancy': [],
+        'unique_x1': [],
+        'unique_x2': [],
+        'synergy': [],
+        'total_mi': [],
+        'n_sequences': len(X1_list),
+        'n_labels': n_labels,
+        'unique_labels': unique_labels.tolist()
+    }
+    
+    # Compute PID for each lag
+    for lag in range(max_lag + 1):
+        # Create probability distribution for this lag using all sequences
+        P = create_temporal_distribution_label_multi(X1_list, X2_list, Y_list, n_labels, lag, bins)
+        
+        # Check if distribution is valid (not all zeros)
+        if np.sum(P) == 0:
+            print(f"Warning: Empty distribution at lag {lag}. Skipping.")
+            continue
+        
+        # Optimize to get Q
+        Q = solve_Q_label(P)
+        
+        # Calculate PID components
+        redundancy = CoI_label(Q)
+        unique_x1 = UI_label(Q, cond_id=1)
+        unique_x2 = UI_label(Q, cond_id=0)
+        synergy = CI_label(P, Q)
+        
+        # Calculate total mutual information
+        total_mi = MI(P.transpose([2, 0, 1]).reshape((P.shape[2], P.shape[0]*P.shape[1])))
+        
+        # Store results
+        results['lags'].append(lag)
+        results['redundancy'].append(redundancy)
+        results['unique_x1'].append(unique_x1)
+        results['unique_x2'].append(unique_x2)
+        results['synergy'].append(synergy)
+        results['total_mi'].append(total_mi)
+    
+    # Convert to numpy arrays
+    for key in results:
+        results[key] = np.array(results[key])
+
+    return results
+
 # Example usage and synthetic experiment
 if __name__ == "__main__":
     print("Temporal RUS Analysis for Time Series Classification")
@@ -567,51 +619,69 @@ if __name__ == "__main__":
                    1: "Decreasing trend + Low freq",
                    2: "Synergistic step functions"}
     
-    all_results = {}
+    # Generate synthetic data for all classes
+    print("\nGenerating synthetic data for all classes...")
+    X1_list = []
+    X2_list = []
+    Y_list = []
+    
+    # Generate multiple sequences per class for better statistics
+    n_sequences_per_class = 4
     
     for class_label in [0, 1, 2]:
-        print(f"\nAnalyzing Class {class_label}: {class_names[class_label]}")
-        print("-"*50)
+        print(f"Generating {n_sequences_per_class} sequences for Class {class_label}: {class_names[class_label]}")
         
-        # Generate synthetic data for this class
-        X1, X2, Y = generate_synthetic_classification_data(
-            seq_length=50, 
-            class_label=class_label, 
-            noise_level=0.2, 
-            seed=42 + class_label  # Different seed for each class
-        )
-        
-        print(f"Generated data: X1 shape={X1.shape}, X2 shape={X2.shape}, Y={Y}")
-        
-        # Plot the data
-        plot_synthetic_data(
-            X1, X2, Y, 
-            save_path=f'../results/synthetic_class_{class_label}_data.png'
-        )
-        
-        # Compute temporal PID sequences
-        print("Computing temporal RUS sequences...")
-        temporal_results = temporal_pid_label_sequence(
-            X1, X2, Y,
-            max_lag=30,  # Analyze up to lag 30
-            window_size=10,
-            bins=6
-        )
-        
-        # Store results
-        all_results[class_label] = temporal_results
-        
-        # Print summary statistics
-        print(f"\nTemporal analysis completed for lags 0 to {len(temporal_results['lags'])-1}")
-        print(f"Peak total MI: {np.max(temporal_results['total_mi']):.4f} at lag {np.argmax(temporal_results['total_mi'])}")
-        print(f"Peak redundancy: {np.max(temporal_results['redundancy']):.4f} at lag {np.argmax(temporal_results['redundancy'])}")
-        print(f"Peak unique X1: {np.max(temporal_results['unique_x1']):.4f} at lag {np.argmax(temporal_results['unique_x1'])}")
-        print(f"Peak unique X2: {np.max(temporal_results['unique_x2']):.4f} at lag {np.argmax(temporal_results['unique_x2'])}")
-        print(f"Peak synergy: {np.max(temporal_results['synergy']):.4f} at lag {np.argmax(temporal_results['synergy'])}")
-        
-        # Plot temporal RUS sequences for this class
-        plot_temporal_rus_sequences(
-            temporal_results,
-            title=f'Temporal RUS - Class {class_label}: {class_names[class_label]}',
-            save_path=f'../results/temporal_rus_class_{class_label}.png'
-        )
+        for seq_idx in range(n_sequences_per_class):
+            # Generate synthetic data for this class with different random seeds
+            X1, X2, Y = generate_synthetic_classification_data(
+                seq_length=50, 
+                class_label=class_label, 
+                noise_level=0.2, 
+                seed=42 + class_label * 10 + seq_idx  # Different seed for each sequence
+            )
+            
+            X1_list.append(X1)
+            X2_list.append(X2)
+            Y_list.append(Y)
+            
+            # Plot first sequence of each class
+            if seq_idx == 0:
+                plot_synthetic_data(
+                    X1, X2, Y, 
+                    save_path=f'../results/synthetic_class_{class_label}_data.png'
+                )
+    
+    print(f"\nTotal sequences generated: {len(X1_list)}")
+    print(f"Unique labels: {np.unique(Y_list)}")
+    print(f"Sequences per class: {n_sequences_per_class}")
+    
+    # Analyze all sequences together
+    print("\n" + "="*60)
+    print("Analyzing all sequences together with temporal_pid_label_multi_sequence")
+    print("="*60)
+    
+    # Compute temporal PID for all sequences together
+    temporal_results = temporal_pid_label_multi_sequence(
+        X1_list, X2_list, Y_list,
+        max_lag=30,  # Analyze up to lag 30
+        bins=6
+    )
+    
+    # Print summary statistics
+    print(f"\nTemporal analysis completed for lags 0 to {len(temporal_results['lags'])-1}")
+    print(f"Number of sequences analyzed: {temporal_results['n_sequences']}")
+    print(f"Number of unique labels: {temporal_results['n_labels']}")
+    print(f"Unique labels: {temporal_results['unique_labels']}")
+    
+    print(f"\nPeak total MI: {np.max(temporal_results['total_mi']):.4f} at lag {np.argmax(temporal_results['total_mi'])}")
+    print(f"Peak redundancy: {np.max(temporal_results['redundancy']):.4f} at lag {np.argmax(temporal_results['redundancy'])}")
+    print(f"Peak unique X1: {np.max(temporal_results['unique_x1']):.4f} at lag {np.argmax(temporal_results['unique_x1'])}")
+    print(f"Peak unique X2: {np.max(temporal_results['unique_x2']):.4f} at lag {np.argmax(temporal_results['unique_x2'])}")
+    print(f"Peak synergy: {np.max(temporal_results['synergy']):.4f} at lag {np.argmax(temporal_results['synergy'])}")
+    
+    # Plot temporal RUS sequences
+    plot_temporal_rus_sequences(
+        temporal_results,
+        title='Temporal RUS Analysis - All Classes Combined',
+        save_path='../results/temporal_rus_all_classes.png'
+    )
