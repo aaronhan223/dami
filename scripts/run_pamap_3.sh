@@ -11,7 +11,7 @@
 # python ../src/train_pamap.py --subject_id 6 --seq_len 100 --num_moe_layers 3 --cuda_device 2 --use_wandb --rus_dominance_threshold 0.4
 
 python ../src/train_pamap_baseline.py \
-    --subject_id 1 \
+    --subject_id 2 \
     --seq_len 100 \
     --num_moe_layers 3 \
     --cuda_device 2 \
@@ -20,4 +20,6 @@ python ../src/train_pamap_baseline.py \
     --moe_k 2 \
     --moe_expert_hidden_dim 128 \
     --seed 42 \
-    --lambda_load 0.1
+    --lambda_load 0.1 \
+    --plot_expert_activations \
+    --plot_num_samples 64

@@ -16,34 +16,61 @@
 #     --dominance_percentage 0.9 
 
 # Loop through different threshold values for threshold_u, threshold_r, and threshold_s
-for threshold_u in 0.3 0.4 0.5; do
-    for threshold_r in 0.05 0.075 0.1; do
-        for threshold_s in 0.05 0.075 0.1; do
-            echo "Running with thresholds: U=$threshold_u, R=$threshold_r, S=$threshold_s"
-            python ../src/train_pamap.py \
-                --subject_id 1 \
-                --seq_len 10 \
-                --num_moe_layers 3 \
-                --cuda_device 0 \
-                --use_wandb \
-                --rus_max_lag 10 \
-                --rus_bins 8 \
-                --moe_num_experts 16 \
-                --moe_num_synergy_experts 2 \
-                --moe_k 2 \
-                --moe_expert_hidden_dim 128 \
-                --moe_router_gru_hidden_dim 64 \
-                --moe_router_token_processed_dim 64 \
-                --moe_router_attn_key_dim 32 \
-                --moe_router_attn_value_dim 32 \
-                --seed 42 \
-                --threshold_u $threshold_u \
-                --threshold_r $threshold_r \
-                --threshold_s $threshold_s \
-                --lambda_u 0.1 \
-                --lambda_r 0.1 \
-                --lambda_s 0.1 \
-                --lambda_load 0.1
-        done
-    done
-done
+# for threshold_u in 0.3 0.4 0.5; do
+#     for threshold_r in 0.05 0.075 0.1; do
+#         for threshold_s in 0.05 0.075 0.1; do
+#             echo "Running with thresholds: U=$threshold_u, R=$threshold_r, S=$threshold_s"
+#             python ../src/train_pamap.py \
+#                 --subject_id 1 \
+#                 --seq_len 10 \
+#                 --num_moe_layers 3 \
+#                 --cuda_device 0 \
+#                 --use_wandb \
+#                 --rus_max_lag 10 \
+#                 --rus_bins 8 \
+#                 --moe_num_experts 16 \
+#                 --moe_num_synergy_experts 2 \
+#                 --moe_k 2 \
+#                 --moe_expert_hidden_dim 128 \
+#                 --moe_router_gru_hidden_dim 64 \
+#                 --moe_router_token_processed_dim 64 \
+#                 --moe_router_attn_key_dim 32 \
+#                 --moe_router_attn_value_dim 32 \
+#                 --seed 42 \
+#                 --threshold_u $threshold_u \
+#                 --threshold_r $threshold_r \
+#                 --threshold_s $threshold_s \
+#                 --lambda_u 0.1 \
+#                 --lambda_r 0.1 \
+#                 --lambda_s 0.1 \
+#                 --lambda_load 0.1
+#         done
+#     done
+# done
+
+python ../src/train_pamap.py \
+    --subject_id 2 \
+    --seq_len 100 \
+    --num_moe_layers 3 \
+    --cuda_device 0 \
+    --use_wandb \
+    --rus_max_lag 10 \
+    --rus_bins 8 \
+    --moe_num_experts 16 \
+    --moe_num_synergy_experts 2 \
+    --moe_k 2 \
+    --moe_expert_hidden_dim 128 \
+    --moe_router_gru_hidden_dim 64 \
+    --moe_router_token_processed_dim 64 \
+    --moe_router_attn_key_dim 32 \
+    --moe_router_attn_value_dim 32 \
+    --seed 42 \
+    --threshold_u 0.6 \
+    --threshold_r 0.6 \
+    --threshold_s 0.6 \
+    --lambda_u 0.1 \
+    --lambda_r 0.1 \
+    --lambda_s 0.1 \
+    --lambda_load 0.1 \
+    --plot_expert_activations \
+    --plot_num_samples 64

@@ -21,14 +21,34 @@ import pdb
 try:
     from baseline_moe_model import BaselineMoEModel, BaselineMoEBlock, calculate_load_balancing_loss
     from pamap_rus import get_pamap_column_names, load_pamap_data, preprocess_pamap_data
+    from plot_expert_activation import analyze_expert_activations
 except ImportError as e:
     print(f"Error importing project files: {e}")
-    print("Please ensure baseline_moe_model.py and pamap_rus.py are accessible.")
+    print("Please ensure baseline_moe_model.py, pamap_rus.py, and plot_expert_activation.py are accessible.")
     sys.exit(1)
 
 
 DEFAULT_DATASET_DIR = "/cis/home/xhan56/pamap/PAMAP2_Dataset/Protocol"
 DEFAULT_OUTPUT_DIR = "../results/pamap_training_baseline"
+
+
+def get_sensor_names_from_columns(sensor_columns: List[str]) -> List[str]:
+    """
+    Extract meaningful sensor names from column names.
+    For example, 'acc_chest_x' -> 'Chest ACC X'
+    """
+    sensor_names = []
+    for col in sensor_columns:
+        parts = col.split('_')
+        if len(parts) >= 3:
+            sensor_type = parts[0].upper()  # acc, gyro, etc.
+            location = parts[1].capitalize()  # chest, hand, etc.
+            axis = parts[2].upper()  # x, y, z
+            name = f"{location} {sensor_type} {axis}"
+        else:
+            name = col.replace('_', ' ').title()
+        sensor_names.append(name)
+    return sensor_names
 
 
 class PamapWindowDatasetBaseline(Dataset):
@@ -595,6 +615,68 @@ def main(args):
         print("Training finished.")
         if best_epoch != -1:
             print(f"Best Validation Accuracy: {best_val_accuracy:.2f}% at epoch {best_epoch+1}")
+            
+            # Generate expert activation plots for the best model
+            if args.plot_expert_activations and val_size > 0:
+                print("\nGenerating expert activation plots for the best baseline model...")
+                
+                # Load the best model
+                best_model_path = os.path.join(args.output_dir, f'best_model_baseline_subj{args.subject_id}.pth')
+                if os.path.exists(best_model_path):
+                    # Add argparse.Namespace to safe globals for PyTorch 2.6+ compatibility
+                    torch.serialization.add_safe_globals([argparse.Namespace])
+                    checkpoint = torch.load(best_model_path, map_location=device)
+                    
+                    # Create a fresh model instance
+                    plot_model = BaselineMoEModel(
+                        input_dim=input_dim,
+                        d_model=args.d_model,
+                        nhead=args.nhead,
+                        d_ff=args.d_ff,
+                        num_encoder_layers=args.num_encoder_layers,
+                        num_moe_layers=args.num_moe_layers,
+                        moe_config=moe_layer_config,
+                        num_modalities=num_modalities,
+                        num_classes=num_classes,
+                        dropout=args.dropout,
+                        max_seq_len=num_modalities * args.seq_len
+                    ).to(device)
+                    
+                    plot_model.load_state_dict(checkpoint['model_state_dict'])
+                    plot_model.eval()
+                    
+                    # Get a batch of validation data
+                    val_batch_data = []
+                    num_plot_samples = min(args.plot_num_samples, len(val_dataset))
+                    
+                    for i in range(num_plot_samples):
+                        data, _ = val_dataset[i]
+                        val_batch_data.append(data)
+                    
+                    # Stack into batch
+                    val_batch_data = torch.stack(val_batch_data).to(device)
+                    
+                    # Get meaningful sensor names
+                    sensor_names = get_sensor_names_from_columns(sensor_columns)
+                    
+                    # Generate plots
+                    plot_save_dir = os.path.join(args.output_dir, 'expert_activation_plots')
+                    
+                    try:
+                        analyze_expert_activations(
+                            trus_model=None,
+                            baseline_model=plot_model,
+                            data_batch=val_batch_data,
+                            rus_values=None,
+                            modality_names=sensor_names,
+                            save_dir=plot_save_dir
+                        )
+                        print(f"Expert activation plots saved to {plot_save_dir}")
+                    except Exception as e:
+                        print(f"Error generating expert activation plots: {e}")
+                        
+                else:
+                    print(f"Best model checkpoint not found at {best_model_path}")
         else:
             print("Training finished (no validation performed or no improvement).")
         
@@ -658,6 +740,10 @@ if __name__ == '__main__':
     # Distributed training args
     parser.add_argument('--distributed', action='store_true', help='Enable distributed training')
     parser.add_argument('--cuda_device', type=int, default=0, help='Specify which GPU to use when running in single-GPU mode')
+
+    # Expert activation plotting args
+    parser.add_argument('--plot_expert_activations', action='store_true', help='Generate expert activation plots after training')
+    parser.add_argument('--plot_num_samples', type=int, default=32, help='Number of samples to use for expert activation plotting')
 
     args = parser.parse_args()
     
