@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import torch
 import itertools
-from temporal_rus_label import temporal_pid_label_sequence, plot_temporal_rus_sequences
+from temporal_rus_label import temporal_pid_label_multi_sequence, plot_temporal_rus_sequences
 
 DATASET_PATH = "/home/hhchung/MIMIC-IV-Data-Pipeline/XY_dl_data.pkl" # "/cis/home/xhan56/mimic-ts/XY_dl_data.pkl"
 MIMICIV_DITEMS_PATH = "/mnt/d64c1162-08cc-4571-90a3-04c60b6f6f66/hhchung/mimic-code/data/mimiciv/3.1/icu/d_items.csv.gz"# "/cis/home/xhan56/mimic-ts/d_items.csv.gz"
@@ -32,11 +32,12 @@ def get_selected_column_names():
 
     return [itemid_to_label[itemid] for itemid in SELECTED_MED_ITEMIDS], [itemid_to_label[itemid] for itemid in SELECTED_CHART_ITEMIDS]
 
-def preprocess_mimiciv_data(meds: torch.Tensor, chart: torch.Tensor, med_itemids: list, chart_itemids: list, num_patients: int = 1):
+def preprocess_mimiciv_data(meds: torch.Tensor, chart: torch.Tensor, targets: torch.Tensor, med_itemids: list, chart_itemids: list, num_patients: int = 1, return_dense_meds: bool = False):
     """Select meds and chart of interest and filter out patients with sparse meds time series
     Args:
         meds: torch.Tensor, shape (n_samples, n_timesteps, n_features)
         chart: torch.Tensor, shape (n_samples, n_timesteps, n_features)
+        targets: torch.Tensor, shape (n_samples,)
         med_itemids: list, shape (n_features,)
         chart_itemids: list, shape (n_features,)
         num_patients: int, number of patients to select
@@ -56,13 +57,22 @@ def preprocess_mimiciv_data(meds: torch.Tensor, chart: torch.Tensor, med_itemids
     selected_meds = meds[:, :, selected_med_column_idx_list]
     selected_chart = chart[:, :, selected_chart_column_idx_list]
 
-    med_nonzero_ratio = (selected_meds != 0).sum(dim=[1, 2]) / selected_meds.shape[1] / selected_meds.shape[2] # nonzero ratio for each patient (sparsity)
-    
-    sorted_med_nonzero_ratio_idx_list = torch.argsort(med_nonzero_ratio, descending=True)
+    if return_dense_meds:
+        med_nonzero_ratio = (selected_meds != 0).sum(dim=[1, 2]) / selected_meds.shape[1] / selected_meds.shape[2] # nonzero ratio for each patient (sparsity)
+        
+        sorted_med_nonzero_ratio_idx_list = torch.argsort(med_nonzero_ratio, descending=True)
 
-    return selected_meds[sorted_med_nonzero_ratio_idx_list[:num_patients]].numpy(), \
-           selected_chart[sorted_med_nonzero_ratio_idx_list[:num_patients]].numpy()
-    
+        return selected_meds[sorted_med_nonzero_ratio_idx_list[:num_patients]].numpy(), \
+            selected_chart[sorted_med_nonzero_ratio_idx_list[:num_patients]].numpy(), \
+            targets[sorted_med_nonzero_ratio_idx_list[:num_patients]].numpy()
+    else:
+        # Randomly select num_patients indices
+        total_patients = selected_meds.shape[0]
+        random_indices = torch.randperm(total_patients)[:num_patients]
+        
+        return selected_meds[random_indices].numpy(), \
+            selected_chart[random_indices].numpy(), \
+            targets[random_indices].numpy()
 
 
 def main():
@@ -73,14 +83,12 @@ def main():
     print("Selected meds column names: ", selected_meds_column_names)
     print("Selected chart column names: ", selected_chart_column_names)
 
-    selected_meds, selected_chart = preprocess_mimiciv_data(mimiciv["meds"], mimiciv["chart"], mimiciv["keys_to_cols"]["MEDS"], mimiciv["keys_to_cols"]["CHART"], num_patients=1)
-    target = mimiciv["y"].numpy()
-
-    # squeeze to remove the batch dimension (there is only one patient)
-    selected_meds, selected_chart = selected_meds.squeeze(0), selected_chart.squeeze(0)
-
+    selected_meds, selected_chart, selected_targets = preprocess_mimiciv_data(mimiciv["meds"], mimiciv["chart"], mimiciv["y"], mimiciv["keys_to_cols"]["MEDS"], mimiciv["keys_to_cols"]["CHART"], num_patients=40, return_dense_meds=True)
+    print(f"Selected meds: {selected_meds.shape}")
+    print(f"Selected chart: {selected_chart.shape}")
+    print(f"Selected targets: {selected_targets}")
     # combine selected_meds and selected_chart
-    selected_medschart = np.concatenate([selected_meds, selected_chart], axis=1)
+    selected_medschart = np.concatenate([selected_meds, selected_chart], axis=2)
     selected_medschart_column_names = selected_meds_column_names + selected_chart_column_names
     medschart_pairs = list(itertools.combinations(range(len(selected_medschart_column_names)), 2))
     print(f"Number of pairs: {len(medschart_pairs)}")
@@ -90,11 +98,11 @@ def main():
         col1 = selected_medschart_column_names[idx1]
         col2 = selected_medschart_column_names[idx2]
         print(f"Analyzing {col1} vs {col2}")
-        X1 = selected_medschart[:, idx1]
-        X2 = selected_medschart[:, idx2]
-        Y = target
+        X1 = list(selected_medschart[:, :, idx1])
+        X2 = list(selected_medschart[:, :, idx2])
+        Y = list(selected_targets)
     
-        temporal_results = temporal_pid_label_sequence(X1, X2, Y, max_lag=MAX_LAG, window_size=WINDOW_SIZE, bins=BINS)
+        temporal_results = temporal_pid_label_multi_sequence(X1, X2, Y, max_lag=MAX_LAG, bins=BINS)
 
         all_results[f"{col1}_{col2}"] = temporal_results
         print(f"\nTemporal analysis completed for lags 0 to {len(temporal_results['lags'] - 1)}")
