@@ -144,9 +144,9 @@ def plot_expert_activation_histogram(
                        f'{height:.1f}', ha='center', va='bottom', fontsize=8)
     
     # Customize the plot
-    ax.set_xlabel('Expert Index', fontsize=12)
-    ax.set_ylabel('Activation Ratio (%)', fontsize=12)
-    ax.set_title(f'{model_type} Model - {layer_name} Expert Activation Ratios', fontsize=14)
+    ax.set_xlabel('Expert Index', fontsize=24)
+    ax.set_ylabel('Activation Ratio (%)', fontsize=24)
+    ax.set_title(f'{model_type} Model - {layer_name} Expert Activation Ratios', fontsize=28)
     ax.set_xticks(x)
     ax.set_xticklabels([f'{i}' for i in range(num_experts)])
     # ax.legend(title='Modality', bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -154,7 +154,9 @@ def plot_expert_activation_histogram(
     
     # Set y-axis limit
     ax.set_ylim(0, max(100, activation_ratios.max() * 1.1))
-    
+    # Set font sizes for ticks
+    ax.tick_params(axis='x', labelsize=20)
+    ax.tick_params(axis='y', labelsize=20)
     plt.tight_layout()
     
     if save_path:
@@ -224,6 +226,17 @@ def plot_all_moe_layers_trus(
             "TRUS",
             save_path
         )
+        
+        # Plot stacked activation plot
+        stacked_save_path = os.path.join(save_dir, f"trus_moe_layer_{layer_idx + 1}_stacked.png") if save_dir else None
+        
+        create_stacked_activation_plot(
+            activation_ratios,
+            modality_names,
+            layer_name,
+            "TRUS",
+            stacked_save_path
+        )
 
 
 def plot_all_moe_layers_baseline(
@@ -285,6 +298,17 @@ def plot_all_moe_layers_baseline(
             "Baseline",
             save_path
         )
+        
+        # Plot stacked activation plot
+        stacked_save_path = os.path.join(save_dir, f"baseline_moe_layer_{layer_idx + 1}_stacked.png") if save_dir else None
+        
+        create_stacked_activation_plot(
+            activation_ratios,
+            modality_names,
+            layer_name,
+            "Baseline",
+            stacked_save_path
+        )
 
 
 def create_stacked_activation_plot(
@@ -329,15 +353,16 @@ def create_stacked_activation_plot(
         bottom += normalized_ratios[:, i]
     
     # Customize the plot
-    ax.set_xlabel('Expert Index', fontsize=12)
-    ax.set_ylabel('Modality Composition (%)', fontsize=12)
-    ax.set_title(f'{model_type} Model - {layer_name} Expert Modality Composition', fontsize=14)
+    ax.set_xlabel('Expert Index', fontsize=24)
+    ax.set_ylabel('Modality Composition (%)', fontsize=24)
+    ax.set_title(f'{model_type} Model - {layer_name} Expert Modality Composition', fontsize=28)
     ax.set_xticks(x)
-    ax.set_xticklabels([f'Expert {i}' for i in range(num_experts)])
-    ax.legend(title='Modality', bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.set_xticklabels([f'{i}' for i in range(num_experts)])
+    # ax.legend(title='Modality', bbox_to_anchor=(1.05, 1), loc='upper left')
     ax.set_ylim(0, 100)
     ax.grid(True, alpha=0.3, axis='y')
-    
+    ax.tick_params(axis='x', labelsize=20)
+    ax.tick_params(axis='y', labelsize=20)
     plt.tight_layout()
     
     if save_path:
@@ -387,12 +412,3 @@ def analyze_expert_activations(
                                    modality_names, baseline_save_dir)
     
     print(f"Analysis complete. Plots saved to {save_dir}")
-
-
-if __name__ == "__main__":
-    # Example usage with dummy data
-    print("This script provides functions to plot expert activation ratios.")
-    print("Import it in your training script and use the functions after loading your models.")
-    print("\nExample usage:")
-    print("from plot_expert_activation import analyze_expert_activations")
-    print("analyze_expert_activations(trus_model, baseline_model, data_batch, rus_values, modality_names)") 
