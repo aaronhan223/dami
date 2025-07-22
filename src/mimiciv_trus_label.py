@@ -6,23 +6,36 @@ import torch
 import itertools
 from temporal_rus_label import temporal_pid_label_multi_sequence, plot_temporal_rus_sequences
 
-DATASET_PATH = "/home/hhchung/MIMIC-IV-Data-Pipeline/XY_dl_data.pkl" # "/cis/home/xhan56/mimic-ts/XY_dl_data.pkl"
-MIMICIV_DITEMS_PATH = "/mnt/d64c1162-08cc-4571-90a3-04c60b6f6f66/hhchung/mimic-code/data/mimiciv/3.1/icu/d_items.csv.gz"# "/cis/home/xhan56/mimic-ts/d_items.csv.gz"
+DATASET_PATH = "/cis/home/xhan56/mimic-ts/XY_dl_data.pkl"
+MIMICIV_DITEMS_PATH = "/cis/home/xhan56/mimic-ts/d_items.csv.gz"
 OUTPUT_DIR = "../results/mimiciv"
-MAX_LAG = 6
+MAX_LAG = 20
 WINDOW_SIZE = 8
-BINS = 10
+BINS = 20
 
 # item ids for meds of interest
 SELECTED_MED_ITEMIDS = [223258, # insulin
                         228340, # furosemide (lasix)
                         225936, # Replete with Fiber (Full), should not be predictive
+                        225158,
+                        220949,
+                        225152,
+                        222168,
+                        225828
                        ]
 
 # item ids for chart of interest
 SELECTED_CHART_ITEMIDS = [225624, # BUN
                           223769, # O2 Saturation Pulseoxymetry Alarm - High
                           223761, # Temperature Fahrenheit, should not be predictive
+                          220621,
+                          227442,
+                          220635,
+                          220645,
+                          220602,
+                          220210,
+                          220277,
+                          227443
                          ]
 
 def get_selected_column_names():

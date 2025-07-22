@@ -48,57 +48,6 @@ def calculate_expert_activation_ratios_trus(
     return activation_ratios
 
 
-def calculate_expert_activation_ratios_baseline(
-    expert_indices: torch.Tensor,
-    num_experts: int,
-    num_modalities: int,
-    seq_len: int,
-    modality_names: Optional[List[str]] = None
-) -> np.ndarray:
-    """
-    Calculate the activation ratio for each expert per modality for baseline model.
-    
-    Args:
-        expert_indices: Tensor of shape (B, S, k) where S = M * T
-        num_experts: Total number of experts
-        num_modalities: Number of modalities (M)
-        seq_len: Sequence length (T)
-        modality_names: Optional list of modality names
-        
-    Returns:
-        activation_ratios: Array of shape (num_experts, num_modalities) with activation percentages
-    """
-    B, S, k = expert_indices.shape
-    assert S == num_modalities * seq_len, f"S ({S}) != M ({num_modalities}) * T ({seq_len})"
-    
-    if modality_names is None:
-        modality_names = [f"Modality_{i}" for i in range(num_modalities)]
-    
-    # Initialize activation counts
-    activation_counts = np.zeros((num_experts, num_modalities))
-    
-    # Count activations for each expert and modality
-    # Need to figure out which modality each token belongs to
-    for b in range(B):
-        for s in range(S):
-            # Determine which modality this token belongs to
-            # In the model, tokens are reshaped from (B, M, T, E) to (B, M*T, E)
-            # So the flattening order is: [M0_T0, M0_T1, ..., M0_T(T-1), M1_T0, M1_T1, ...]
-            modality_idx = s // seq_len
-            
-            for j in range(k):
-                expert_idx = expert_indices[b, s, j].item()
-                activation_counts[expert_idx, modality_idx] += 1
-    
-    # Calculate total tokens per modality
-    total_tokens_per_modality = B * seq_len * k
-    
-    # Calculate activation ratios (percentages)
-    activation_ratios = (activation_counts / total_tokens_per_modality) * 100
-    
-    return activation_ratios
-
-
 def plot_expert_activation_histogram(
     activation_ratios: np.ndarray,
     modality_names: List[str],
@@ -149,7 +98,7 @@ def plot_expert_activation_histogram(
     ax.set_title(f'{model_type} Model - {layer_name} Expert Activation Ratios', fontsize=28)
     ax.set_xticks(x)
     ax.set_xticklabels([f'{i}' for i in range(num_experts)])
-    # ax.legend(title='Modality', bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.legend(title='Modality', bbox_to_anchor=(1.05, 1), loc='upper left')
     ax.grid(True, alpha=0.3, axis='y')
     
     # Set y-axis limit
@@ -168,7 +117,7 @@ def plot_expert_activation_histogram(
 
 def plot_all_moe_layers_trus(
     model: nn.Module,
-    data_batch: torch.Tensor,
+    data_batch,
     rus_values: Dict[str, torch.Tensor],
     modality_names: Optional[List[str]] = None,
     save_dir: Optional[str] = None
@@ -178,7 +127,9 @@ def plot_all_moe_layers_trus(
     
     Args:
         model: The TRUS MoE model
-        data_batch: Input data batch of shape (B, M, T, E)
+        data_batch: Input data batch - can be either:
+                   - Single tensor of shape (B, M, T, E)
+                   - List of tensors [tensor1, tensor2, ...] where each tensor is (B, T, E_i)
         rus_values: RUS values dictionary
         modality_names: Optional list of modality names
         save_dir: Optional directory to save figures
@@ -192,8 +143,12 @@ def plot_all_moe_layers_trus(
         # Forward pass to get all auxiliary outputs
         _, all_aux_moe_outputs = model(data_batch, rus_values)
     
-    # Get modality names if not provided
-    num_modalities = data_batch.shape[1]
+    # Get modality names and count from data_batch
+    if isinstance(data_batch, list):
+        num_modalities = len(data_batch)
+    else:
+        num_modalities = data_batch.shape[1]
+    
     if modality_names is None:
         modality_names = [f"Modality_{i}" for i in range(num_modalities)]
     
@@ -203,7 +158,12 @@ def plot_all_moe_layers_trus(
         
         # Get the actual MoE layer to find number of experts
         moe_layer_count = 0
-        for layer in model.layers:
+        num_experts = 8  # Default fallback
+        
+        # Handle DDP wrapped models
+        actual_model = model.module if hasattr(model, 'module') else model
+        
+        for layer in actual_model.layers:
             if hasattr(layer, 'moe_layer'):
                 if moe_layer_count == layer_idx:
                     num_experts = layer.moe_layer.num_experts
@@ -241,7 +201,7 @@ def plot_all_moe_layers_trus(
 
 def plot_all_moe_layers_baseline(
     model: nn.Module,
-    data_batch: torch.Tensor,
+    data_batch,
     modality_names: Optional[List[str]] = None,
     save_dir: Optional[str] = None
 ):
@@ -250,7 +210,9 @@ def plot_all_moe_layers_baseline(
     
     Args:
         model: The baseline MoE model
-        data_batch: Input data batch of shape (B, M, T, E)
+        data_batch: Input data batch - can be either:
+                   - Single tensor of shape (B, M, T, E)
+                   - List of tensors [tensor1, tensor2, ...] where each tensor is (B, T, E_i)
         modality_names: Optional list of modality names
         save_dir: Optional directory to save figures
     """
@@ -259,7 +221,12 @@ def plot_all_moe_layers_baseline(
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
     
-    B, M, T, E = data_batch.shape
+    # Handle both tensor and list input formats
+    if isinstance(data_batch, list):
+        B, T = data_batch[0].shape[:2]
+        M = len(data_batch)
+    else:
+        B, M, T, E = data_batch.shape
     
     with torch.no_grad():
         # Forward pass to get all auxiliary outputs
@@ -275,7 +242,12 @@ def plot_all_moe_layers_baseline(
         
         # Get the actual MoE layer to find number of experts
         moe_layer_count = 0
-        for layer in model.layers:
+        num_experts = 8  # Default fallback
+        
+        # Handle DDP wrapped models
+        actual_model = model.module if hasattr(model, 'module') else model
+        
+        for layer in actual_model.layers:
             if hasattr(layer, 'moe_layer'):
                 if moe_layer_count == layer_idx:
                     num_experts = layer.moe_layer.num_experts
@@ -283,8 +255,8 @@ def plot_all_moe_layers_baseline(
                 moe_layer_count += 1
         
         # Calculate activation ratios
-        activation_ratios = calculate_expert_activation_ratios_baseline(
-            expert_indices, num_experts, M, T, modality_names
+        activation_ratios = calculate_expert_activation_ratios_trus(
+            expert_indices, num_experts, modality_names
         )
         
         # Plot histogram
@@ -358,7 +330,7 @@ def create_stacked_activation_plot(
     ax.set_title(f'{model_type} Model - {layer_name} Expert Modality Composition', fontsize=28)
     ax.set_xticks(x)
     ax.set_xticklabels([f'{i}' for i in range(num_experts)])
-    # ax.legend(title='Modality', bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.legend(title='Modality', bbox_to_anchor=(1.05, 1), loc='upper left')
     ax.set_ylim(0, 100)
     ax.grid(True, alpha=0.3, axis='y')
     ax.tick_params(axis='x', labelsize=20)
@@ -376,7 +348,7 @@ def create_stacked_activation_plot(
 def analyze_expert_activations(
     trus_model: Optional[nn.Module] = None,
     baseline_model: Optional[nn.Module] = None,
-    data_batch: torch.Tensor = None,
+    data_batch = None,
     rus_values: Optional[Dict[str, torch.Tensor]] = None,
     modality_names: Optional[List[str]] = None,
     save_dir: str = "../results/expert_activation_plots"
@@ -387,7 +359,9 @@ def analyze_expert_activations(
     Args:
         trus_model: TRUS MoE model (optional)
         baseline_model: Baseline MoE model (optional)
-        data_batch: Input data batch of shape (B, M, T, E)
+        data_batch: Input data batch - can be either:
+                   - Single tensor of shape (B, M, T, E)
+                   - List of tensors [tensor1, tensor2, ...] where each tensor is (B, T, E_i)
         rus_values: RUS values dictionary (required for TRUS model)
         modality_names: Optional list of modality names
         save_dir: Directory to save plots

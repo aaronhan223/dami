@@ -75,19 +75,49 @@ def solve_Q_label(P: np.ndarray):
     all_constrs = [sum_to_one_Q] + A_cstrs + B_cstrs + Q_pdt_dist_cstrs
     prob = cp.Problem(cp.Minimize(obj), all_constrs)
     
-    # Solve with better error handling
-    try:
-        prob.solve(verbose=False, max_iter=50000)
-        if prob.status not in ["optimal", "optimal_inaccurate"]:
-            print(f"Warning: Problem status is {prob.status}")
-    except Exception as e:
-        print(f"Optimization error: {e}")
-        # Try with different solver
+    # Solve with comprehensive error handling - try multiple solvers
+    solvers_to_try = [
+        (None, "CLARABEL (default)"),  # Default solver first
+        (cp.ECOS, "ECOS"),
+        (cp.SCS, "SCS"),
+        (cp.OSQP, "OSQP"),
+        (cp.CVXOPT, "CVXOPT")
+    ]
+    
+    solved = False
+    for solver, solver_name in solvers_to_try:
         try:
-            prob.solve(verbose=False, max_iter=50000, solver=cp.ECOS)
-        except:
-            print("Falling back to SCS solver")
-            prob.solve(verbose=False, max_iter=50000, solver=cp.SCS)
+            if solver is None:
+                prob.solve(verbose=False, max_iter=50000)
+            else:
+                prob.solve(verbose=False, max_iter=50000, solver=solver)
+            
+            if prob.status in ["optimal", "optimal_inaccurate"]:
+                solved = True
+                break
+            elif prob.status in ["infeasible", "unbounded"]:
+                print(f"Warning: Problem is {prob.status} with {solver_name}")
+                continue
+            else:
+                print(f"Warning: Problem status is {prob.status} with {solver_name}")
+                continue
+                
+        except Exception as e:
+            print(f"Solver {solver_name} failed: {e}")
+            continue
+    
+    if not solved:
+        print("Warning: All solvers failed. Trying SCS with relaxed parameters...")
+        try:
+            prob.solve(verbose=True, max_iter=100000, solver=cp.SCS, eps=1e-6)
+            if prob.status not in ["optimal", "optimal_inaccurate"]:
+                print(f"Final attempt status: {prob.status}")
+        except Exception as e:
+            print(f"Final solver attempt failed: {e}")
+            # Return a fallback solution - uniform distribution
+            print("Returning uniform distribution as fallback")
+            uniform_q = np.ones(Q[0].shape) / np.prod(Q[0].shape)
+            return np.stack([uniform_q for _ in range(len(Q))], axis=2)
 
     # Convert to numpy array
     return np.stack([q.value for q in Q], axis=2)

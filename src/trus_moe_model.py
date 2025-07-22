@@ -1,14 +1,11 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
 import math
 import random
-import argparse
 from typing import Dict, Tuple, List, Optional
-import numpy as np
 from tqdm import tqdm
+import pdb
 
 
 def JSD(p_log: torch.Tensor, q_log: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -37,7 +34,10 @@ def JSD(p_log: torch.Tensor, q_log: torch.Tensor, eps: float = 1e-8) -> torch.Te
     return jsd.mean()
 
 
+
 class PositionalEncoding(nn.Module):
+    pe: torch.Tensor  # Type annotation for the buffer
+    
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
@@ -415,7 +415,7 @@ def calculate_rus_losses(gating_probs: torch.Tensor,
     U = rus_values['U'] # (B, M, T)
     R = rus_values['R'] # (B, M, M, T)
     S = rus_values['S'] # (B, M, M, T)
-    import pdb
+
     gating_log_probs = F.log_softmax(gating_probs, dim=-1) # (B, M, T, N_exp)
     gating_log_probs_perm = gating_log_probs.permute(0, 2, 1, 3) # (B, T, M, N_exp)
 
@@ -431,7 +431,7 @@ def calculate_rus_losses(gating_probs: torch.Tensor,
                     log_probs_m2 = gating_log_probs_perm[:, :, m2, :][indicator] # (N_valid, N_exp)
                     if log_probs_m1.numel() > 0: # Check if any pairs were selected
                         jsd_values = JSD(log_probs_m1, log_probs_m2) # Returns scalar mean over N_valid
-                        sum_neg_jsd_unique += (-jsd_values) * indicator.sum() # Scale mean by count
+                        sum_neg_jsd_unique += (-jsd_values) * indicator.sum() # Negative JSD to encourage divergence
                         n_unique_pairs += indicator.sum()
     L_unique = lambda_U * (sum_neg_jsd_unique / (n_unique_pairs + epsilon))
 
@@ -463,11 +463,10 @@ def calculate_rus_losses(gating_probs: torch.Tensor,
                     p_syn_m2 = p_assign_synergy_all[:, :, m2][indicator] # (N_valid,)
                     if p_syn_m1.numel() > 0:
                         avg_p_synergy = (p_syn_m1 + p_syn_m2) / 2.0
-                        neg_log_p = -torch.log(avg_p_synergy.clamp(min=epsilon)) # Clamp before log
-                        sum_neglogp_synergy += neg_log_p.sum()
+                        one_minus_p = 1.0 - avg_p_synergy.clamp(max=1.0-epsilon) # Use 1-p for balanced scale
+                        sum_neglogp_synergy += one_minus_p.sum()
                         n_synergy_pairs += indicator.sum()
     L_synergy = lambda_S * (sum_neglogp_synergy / (n_synergy_pairs + epsilon))
-
     return L_unique, L_redundancy, L_synergy
 
 

@@ -274,7 +274,13 @@ def solve_Q_temporal(P: np.ndarray):
 
     # Objective: minimize I(X1; X2 | Y)
     obj = cp.sum([cp.sum(cp.rel_entr(Q[i], Q_x1x2[i])) for i in range(P.shape[2])])
-    all_constrs = [sum_to_one_Q] + A_cstrs + B_cstrs + Q_pdt_dist_cstrs
+    
+    all_constrs = []
+    all_constrs.append(sum_to_one_Q)
+    all_constrs.extend(A_cstrs)
+    all_constrs.extend(B_cstrs) 
+    all_constrs.extend(Q_pdt_dist_cstrs)
+    
     prob = cp.Problem(cp.Minimize(obj), all_constrs)
     
     # Solve with better error handling
@@ -292,7 +298,15 @@ def solve_Q_temporal(P: np.ndarray):
             prob.solve(verbose=False, max_iter=50000, solver=cp.SCS)
 
     # Convert to numpy array
-    return np.stack([q.value for q in Q], axis=2)
+    Q_solution = []
+    for q in Q:
+        if q.value is not None:
+            Q_solution.append(q.value)
+        else:
+            # If optimization failed, return uniform distribution
+            Q_solution.append(np.ones((P.shape[0], P.shape[1])) / (P.shape[0] * P.shape[1]))
+    
+    return np.stack(Q_solution, axis=2)
 
 def CoI_temporal(P: np.ndarray):
     """
@@ -438,7 +452,7 @@ def multi_lag_analysis(X1, X2, Y, max_lag=5, bins=10):
     Parameters:
     -----------
     X1, X2, Y : numpy.ndarray
-        Time series data
+        Time series data (can be multivariate for X1, X2)
     max_lag : int, default=5
         Maximum time lag to consider
     bins : int, default=10
@@ -458,7 +472,7 @@ def multi_lag_analysis(X1, X2, Y, max_lag=5, bins=10):
         'total_di': []
     }
     
-    for lag in range(max_lag):
+    for lag in range(max_lag + 1):
         print(f"Analyzing lag {lag}...")
         pid_result = temporal_pid(X1, X2, Y, lag, bins)
         
