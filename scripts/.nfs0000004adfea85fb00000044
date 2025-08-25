@@ -1,0 +1,26 @@
+#!/bin/bash
+
+cd /cis/home/xhan56/code/dami/src
+
+# python pamap_temporal_distribution_tracking_rus.py \
+# --subject_id 1 \
+# --batch_comparison_file ../results/pamap/pamap_subject1_multimodal_all_lag10_bins4.npy \
+# --plot_results \
+# --max_lag 10 \
+# --update_frequency 1
+
+# python pamap_temporal_distribution_tracking_rus.py \
+# --subject_id 2 \
+# --batch_comparison_file ../results/pamap/pamap_subject2_multimodal_all_lag10_bins4.npy \
+# --plot_results \
+# --max_lag 10 \
+# --update_frequency 1
+
+python pamap_temporal_distribution_tracking_rus.py \
+--subject_id 3 \
+--batch_comparison_file ../results/pamap/pamap_subject3_multimodal_all_lag10_bins4.npy \
+--plot_results \
+--max_lag 10 \
+--update_frequency 1 \
+--n_components 4 \
+--mc_samples 1000

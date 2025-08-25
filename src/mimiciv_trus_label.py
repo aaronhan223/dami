@@ -5,9 +5,10 @@ import numpy as np
 import torch
 import itertools
 from temporal_rus_label import temporal_pid_label_multi_sequence, plot_temporal_rus_sequences
+import pdb
 
 DATASET_PATH = "/cis/home/xhan56/mimic-ts/XY_dl_data.pkl"
-MIMICIV_DITEMS_PATH = "/cis/home/xhan56/mimic-ts/d_items.csv.gz"
+MIMICIV_DITEMS_PATH = "/cis/home/xhan56/mimic-ts/d_items.csv"
 OUTPUT_DIR = "../results/mimiciv"
 MAX_LAG = 20
 WINDOW_SIZE = 8
@@ -40,7 +41,7 @@ SELECTED_CHART_ITEMIDS = [225624, # BUN
 
 def get_selected_column_names():
     """Returns the human readable column names for chartevents and meds of interest"""
-    ditems_df = pd.read_csv(MIMICIV_DITEMS_PATH, compression="gzip")
+    ditems_df = pd.read_csv(MIMICIV_DITEMS_PATH)
     itemid_to_label = dict(zip(ditems_df["itemid"], ditems_df["label"]))
 
     return [itemid_to_label[itemid] for itemid in SELECTED_MED_ITEMIDS], [itemid_to_label[itemid] for itemid in SELECTED_CHART_ITEMIDS]
@@ -110,11 +111,12 @@ def main():
     for i, (idx1, idx2) in enumerate(medschart_pairs):
         col1 = selected_medschart_column_names[idx1]
         col2 = selected_medschart_column_names[idx2]
+        print("************************************************")
         print(f"Analyzing {col1} vs {col2}")
         X1 = list(selected_medschart[:, :, idx1])
         X2 = list(selected_medschart[:, :, idx2])
         Y = list(selected_targets)
-    
+        
         temporal_results = temporal_pid_label_multi_sequence(X1, X2, Y, max_lag=MAX_LAG, bins=BINS)
 
         all_results[f"{col1}_{col2}"] = temporal_results

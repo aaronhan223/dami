@@ -388,7 +388,7 @@ def temporal_pid_batch(X1, X2, Y, lag=1, batch_size=256, n_batches=10,
     
     # Run multiple batches and average results
     all_results = []
-    
+    # TODO: do we need to do this batch-wise? and then average?
     for batch_idx in tqdm(range(n_batches), desc="Processing batches"):
         # Sample subset of data for this batch
         if len(train_ds) > batch_size * 10:
