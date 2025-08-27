@@ -639,7 +639,6 @@ if __name__ == "__main__":
                 noise_level=0.2, 
                 seed=42 + class_label * 10 + seq_idx  # Different seed for each sequence
             )
-            
             X1_list.append(X1)
             X2_list.append(X2)
             Y_list.append(Y)
