@@ -1,0 +1,463 @@
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
+import argparse
+from typing import Dict, List, Tuple
+import pickle
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tqdm import tqdm
+
+# Import required modules
+from mimiciv_rus_multimodal import preprocess_mimiciv_data
+from trus_moe_multimodal import MultimodalTRUSMoEModel
+from train_mimiciv_multimodal import (
+    MultimodalMIMICIVDataset, 
+    collate_multimodal, 
+    extend_rus_with_sequence_length,
+    load_mimiciv_rus_data
+)
+
+
+def load_checkpoint(checkpoint_path: str, device: torch.device):
+    """
+    Load model checkpoint and return model, args, and other metadata.
+    """
+    print(f"Loading checkpoint from: {checkpoint_path}")
+    
+    # Add argparse.Namespace to safe globals for PyTorch 2.6+ compatibility
+    torch.serialization.add_safe_globals([argparse.Namespace])
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    
+    # Extract checkpoint information
+    epoch = checkpoint['epoch']
+    model_state_dict = checkpoint['model_state_dict']
+    best_val_auc = checkpoint['best_val_auc']
+    args = checkpoint['args']
+    modality_configs = checkpoint['modality_configs']
+    modality_names = checkpoint['modality_names']
+    
+    print(f"Checkpoint info:")
+    print(f"  Best epoch: {epoch + 1}")
+    print(f"  Best validation AU-ROC: {best_val_auc:.4f}")
+    print(f"  Modalities: {modality_names}")
+    
+    return model_state_dict, args, modality_configs, modality_names, best_val_auc
+
+
+def create_model_from_checkpoint(model_state_dict, args, modality_configs, num_classes: int, device: torch.device):
+    """
+    Create model instance from checkpoint information.
+    """
+    # MoE configuration
+    moe_router_config = {
+        "gru_hidden_dim": args.moe_router_gru_hidden_dim,
+        "token_processed_dim": args.moe_router_token_processed_dim,
+        "attn_key_dim": args.moe_router_attn_key_dim,
+        "attn_value_dim": args.moe_router_attn_value_dim,
+    }
+    
+    moe_layer_config = {
+        "num_experts": args.moe_num_experts,
+        "num_synergy_experts": args.moe_num_synergy_experts,
+        "k": args.moe_k,
+        "expert_hidden_dim": args.moe_expert_hidden_dim,
+        "synergy_expert_nhead": args.nhead,
+        "router_config": moe_router_config,
+        "capacity_factor": args.moe_capacity_factor,
+        "drop_tokens": args.moe_drop_tokens,
+    }
+
+    # Create model
+    model = MultimodalTRUSMoEModel(
+        modality_configs=modality_configs,
+        d_model=args.d_model,
+        nhead=args.nhead,
+        d_ff=args.d_ff,
+        num_encoder_layers=args.num_encoder_layers,
+        num_moe_layers=args.num_moe_layers,
+        moe_config=moe_layer_config,
+        num_classes=num_classes,
+        max_seq_len=args.seq_len,
+        dropout=args.dropout,
+        use_checkpoint=args.use_gradient_checkpointing,
+        output_attention=False
+    ).to(device)
+    
+    # Load state dict
+    model.load_state_dict(model_state_dict)
+    model.eval()
+    
+    print(f"Model created and loaded successfully")
+    print(f"  Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"  Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    
+    return model
+
+
+def evaluate_model(model: MultimodalTRUSMoEModel, 
+                  dataloader: DataLoader, 
+                  device: torch.device,
+                  dataset_name: str = "Test") -> Dict:
+    """
+    Evaluate model on given dataset and return comprehensive metrics.
+    """
+    model.eval()
+    
+    all_predictions = []
+    all_probabilities = []
+    all_labels = []
+    total_loss = 0.0
+    num_batches = 0
+    
+    criterion = nn.CrossEntropyLoss()
+    
+    print(f"\nEvaluating on {dataset_name} set...")
+    progress_bar = tqdm(dataloader, desc=f"Evaluating {dataset_name}")
+    
+    with torch.no_grad():
+        for batch_idx, (modality_data, modality_masks, rus_values_batch, labels) in enumerate(progress_bar):
+            # Move data to device
+            modality_data = [mod.to(device) for mod in modality_data]
+            modality_masks = [mask.to(device) for mask in modality_masks]
+            rus_values = {k: v.to(device) for k, v in rus_values_batch.items()}
+            labels = labels.to(device)
+
+            # Forward pass
+            seq_len = modality_data[0].shape[1]
+            rus_values = extend_rus_with_sequence_length(rus_values, seq_len)
+            final_logits, _ = model(modality_data, rus_values)
+
+            # Calculate loss
+            loss = criterion(final_logits, labels)
+            total_loss += loss.item()
+            num_batches += 1
+
+            # Get predictions and probabilities
+            predictions = torch.argmax(final_logits, dim=1)
+            probabilities = torch.softmax(final_logits, dim=1)
+
+            # Store results
+            all_predictions.extend(predictions.cpu().numpy())
+            all_probabilities.extend(probabilities.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            
+            # Update progress bar
+            current_acc = accuracy_score(all_labels, all_predictions)
+            progress_bar.set_postfix({
+                'Loss': f"{loss.item():.4f}",
+                'Acc': f"{current_acc:.4f}"
+            })
+    
+    # Calculate metrics
+    all_predictions = np.array(all_predictions)
+    all_probabilities = np.array(all_probabilities)
+    all_labels = np.array(all_labels)
+    
+    # Basic metrics
+    accuracy = accuracy_score(all_labels, all_predictions)
+    precision = precision_score(all_labels, all_predictions, average='weighted')
+    recall = recall_score(all_labels, all_predictions, average='weighted')
+    f1 = f1_score(all_labels, all_predictions, average='weighted')
+    
+    # AU-ROC (for binary classification, use positive class probability)
+    if all_probabilities.shape[1] == 2:
+        auc_score = roc_auc_score(all_labels, all_probabilities[:, 1])
+    else:
+        # For multiclass, use one-vs-rest
+        try:
+            auc_score = roc_auc_score(all_labels, all_probabilities, multi_class='ovr', average='weighted')
+        except ValueError:
+            auc_score = 0.0  # In case of issues with multiclass AUC
+    
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+    
+    # Confusion matrix
+    cm = confusion_matrix(all_labels, all_predictions)
+    
+    # Per-class metrics
+    per_class_precision = precision_score(all_labels, all_predictions, average=None)
+    per_class_recall = recall_score(all_labels, all_predictions, average=None)
+    per_class_f1 = f1_score(all_labels, all_predictions, average=None)
+    
+    results = {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1,
+        'auc_score': auc_score,
+        'avg_loss': avg_loss,
+        'confusion_matrix': cm,
+        'per_class_precision': per_class_precision,
+        'per_class_recall': per_class_recall,
+        'per_class_f1': per_class_f1,
+        'predictions': all_predictions,
+        'probabilities': all_probabilities,
+        'labels': all_labels
+    }
+    
+    return results
+
+
+def print_evaluation_results(results: Dict, dataset_name: str, class_names: List[str] = None):
+    """
+    Print comprehensive evaluation results.
+    """
+    print(f"\n{'='*50}")
+    print(f"{dataset_name} Evaluation Results")
+    print(f"{'='*50}")
+    
+    print(f"Overall Metrics:")
+    print(f"  Accuracy:  {results['accuracy']:.4f} ({results['accuracy']*100:.2f}%)")
+    print(f"  Precision: {results['precision']:.4f}")
+    print(f"  Recall:    {results['recall']:.4f}")
+    print(f"  F1-Score:  {results['f1_score']:.4f}")
+    print(f"  AU-ROC:    {results['auc_score']:.4f}")
+    print(f"  Avg Loss:  {results['avg_loss']:.4f}")
+    
+    # Per-class metrics
+    if class_names is None:
+        class_names = [f"Class {i}" for i in range(len(results['per_class_precision']))]
+    
+    print(f"\nPer-Class Metrics:")
+    print(f"{'Class':<15} {'Precision':<10} {'Recall':<10} {'F1-Score':<10}")
+    print(f"{'-'*50}")
+    for i, class_name in enumerate(class_names):
+        if i < len(results['per_class_precision']):
+            print(f"{class_name:<15} {results['per_class_precision'][i]:<10.4f} "
+                  f"{results['per_class_recall'][i]:<10.4f} {results['per_class_f1'][i]:<10.4f}")
+    
+    # Confusion matrix
+    print(f"\nConfusion Matrix:")
+    cm = results['confusion_matrix']
+    print(f"{'Actual \\ Predicted':<20}", end="")
+    for i, class_name in enumerate(class_names):
+        if i < cm.shape[1]:
+            print(f"{class_name:<10}", end="")
+    print()
+    print("-" * (20 + 10 * cm.shape[1]))
+    
+    for i, class_name in enumerate(class_names):
+        if i < cm.shape[0]:
+            print(f"{class_name:<20}", end="")
+            for j in range(cm.shape[1]):
+                print(f"{cm[i, j]:<10}", end="")
+            print()
+
+
+def save_evaluation_plots(results: Dict, output_dir: str, dataset_name: str, class_names: List[str] = None):
+    """
+    Save evaluation plots including confusion matrix and ROC curves.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    if class_names is None:
+        class_names = [f"Class {i}" for i in range(len(results['per_class_precision']))]
+    
+    # Confusion Matrix Plot
+    plt.figure(figsize=(8, 6))
+    cm = results['confusion_matrix']
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=class_names, yticklabels=class_names)
+    plt.title(f'{dataset_name} - Confusion Matrix')
+    plt.xlabel('Predicted')
+    plt.ylabel('Actual')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'{dataset_name.lower()}_confusion_matrix.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # ROC Curve (for binary classification)
+    if results['probabilities'].shape[1] == 2:
+        from sklearn.metrics import roc_curve
+        
+        plt.figure(figsize=(8, 6))
+        fpr, tpr, _ = roc_curve(results['labels'], results['probabilities'][:, 1])
+        plt.plot(fpr, tpr, linewidth=2, label=f'ROC Curve (AUC = {results["auc_score"]:.4f})')
+        plt.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Random Classifier')
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title(f'{dataset_name} - ROC Curve')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{dataset_name.lower()}_roc_curve.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    print(f"Evaluation plots saved to {output_dir}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Test Multimodal TRUS-MoE Model on MIMIC-IV Data')
+    
+    # Required arguments
+    parser.add_argument('--checkpoint_path', type=str, required=True,
+                       help='Path to the model checkpoint')
+    parser.add_argument('--test_data_path', type=str, required=True,
+                       help='Path to the test data')
+    parser.add_argument('--rus_data_path', type=str, required=True,
+                       help='Path to the RUS data')
+    
+    # Optional arguments
+    parser.add_argument('--output_dir', type=str, default='../results/mimiciv/',
+                       help='Directory to save test results')
+    parser.add_argument('--batch_size', type=int, default=512,
+                       help='Batch size for testing')
+    parser.add_argument('--num_workers', type=int, default=0,
+                       help='Number of workers for DataLoader')
+    parser.add_argument('--gpu', type=int, default=None,
+                       help='GPU device ID to use. If None, will use CPU.')
+    parser.add_argument('--save_plots', action='store_true',
+                       help='Save evaluation plots')
+    parser.add_argument('--save_predictions', action='store_true',
+                       help='Save predictions to file')
+    
+    # Additional evaluation options
+    parser.add_argument('--eval_train', action='store_true',
+                       help='Also evaluate on training set (requires --train_data_path)')
+    parser.add_argument('--train_data_path', type=str, default=None,
+                       help='Path to training data (for training set evaluation)')
+    parser.add_argument('--eval_val', action='store_true',
+                       help='Also evaluate on validation set (requires --val_data_path)')
+    parser.add_argument('--val_data_path', type=str, default=None,
+                       help='Path to validation data (for validation set evaluation)')
+    
+    args = parser.parse_args()
+    
+    # Set device
+    if args.gpu is not None:
+        device = torch.device(f"cuda:{args.gpu}")
+        print(f"Using GPU: {device}")
+    else:
+        device = torch.device("cpu")
+        print("Using CPU")
+    
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Load checkpoint
+    model_state_dict, train_args, modality_configs, modality_names, best_val_auc = load_checkpoint(
+        args.checkpoint_path, device)
+    
+    # Load test data
+    print(f"Loading test data from {args.test_data_path}...")
+    test_stays = pickle.load(open(args.test_data_path, 'rb'))
+    test_multimodal_reg_ts, test_labels = preprocess_mimiciv_data(test_stays)
+    
+    # Load RUS data
+    print(f"Loading RUS data from {args.rus_data_path}...")
+    rus_data = load_mimiciv_rus_data(args.rus_data_path, modality_names)
+    
+    # Get data info
+    num_classes = len(np.unique(test_labels))
+    modality_dim_dict = {'labs_vitals': 30, 'cxr': 1024, 'notes': 768}
+    
+    print(f"Test data info:")
+    print(f"  Number of samples: {len(test_multimodal_reg_ts)}")
+    print(f"  Number of classes: {num_classes}")
+    print(f"  Class distribution: {np.bincount(test_labels)}")
+    
+    # Create model
+    model = create_model_from_checkpoint(model_state_dict, train_args, modality_configs, num_classes, device)
+    
+    # Create test dataset and dataloader
+    test_dataset = MultimodalMIMICIVDataset(
+        test_multimodal_reg_ts, test_labels, rus_data, modality_names, modality_dim_dict,
+        max_seq_len=train_args.seq_len, truncate_from_end=train_args.truncate_from_end
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate_multimodal
+    )
+    
+    # Define class names (adjust based on your specific task)
+    class_names = ['Negative', 'Positive']  # Adjust for your specific classification task
+    
+    # Evaluate on test set
+    test_results = evaluate_model(model, test_loader, device, "Test")
+    print_evaluation_results(test_results, "Test", class_names)
+    
+    # Save test plots
+    if args.save_plots:
+        save_evaluation_plots(test_results, args.output_dir, "Test", class_names)
+    
+    # Save predictions
+    if args.save_predictions:
+        predictions_path = os.path.join(args.output_dir, 'test_predictions.npz')
+        np.savez(predictions_path,
+                predictions=test_results['predictions'],
+                probabilities=test_results['probabilities'],
+                labels=test_results['labels'])
+        print(f"Predictions saved to {predictions_path}")
+    
+    # Optional: Evaluate on training set
+    if args.eval_train and args.train_data_path:
+        print(f"\nLoading training data from {args.train_data_path}...")
+        train_stays = pickle.load(open(args.train_data_path, 'rb'))
+        train_multimodal_reg_ts, train_labels = preprocess_mimiciv_data(train_stays)
+        
+        train_dataset = MultimodalMIMICIVDataset(
+            train_multimodal_reg_ts, train_labels, rus_data, modality_names, modality_dim_dict,
+            max_seq_len=train_args.seq_len, truncate_from_end=train_args.truncate_from_end
+        )
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            collate_fn=collate_multimodal
+        )
+        
+        train_results = evaluate_model(model, train_loader, device, "Train")
+        print_evaluation_results(train_results, "Train", class_names)
+        
+        if args.save_plots:
+            save_evaluation_plots(train_results, args.output_dir, "Train", class_names)
+    
+    # Optional: Evaluate on validation set
+    if args.eval_val and args.val_data_path:
+        print(f"\nLoading validation data from {args.val_data_path}...")
+        val_stays = pickle.load(open(args.val_data_path, 'rb'))
+        val_multimodal_reg_ts, val_labels = preprocess_mimiciv_data(val_stays)
+        
+        val_dataset = MultimodalMIMICIVDataset(
+            val_multimodal_reg_ts, val_labels, rus_data, modality_names, modality_dim_dict,
+            max_seq_len=train_args.seq_len, truncate_from_end=train_args.truncate_from_end
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            collate_fn=collate_multimodal
+        )
+        
+        val_results = evaluate_model(model, val_loader, device, "Validation")
+        print_evaluation_results(val_results, "Validation", class_names)
+        
+        if args.save_plots:
+            save_evaluation_plots(val_results, args.output_dir, "Validation", class_names)
+    
+    # Summary
+    print(f"\n{'='*60}")
+    print(f"TESTING COMPLETE")
+    print(f"{'='*60}")
+    print(f"Checkpoint: {args.checkpoint_path}")
+    print(f"Best training validation AU-ROC: {best_val_auc:.4f}")
+    print(f"Test AU-ROC: {test_results['auc_score']:.4f}")
+    print(f"Test Accuracy: {test_results['accuracy']:.4f} ({test_results['accuracy']*100:.2f}%)")
+    print(f"Results saved to: {args.output_dir}")
+    print(f"{'='*60}")
+
+
+if __name__ == "__main__":
+    main()
