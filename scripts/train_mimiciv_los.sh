@@ -35,7 +35,7 @@ if [[ ! "$GPU" =~ ^[0-9]+$ ]]; then
 fi
 
 # Create run name with hyperparameters
-RUN_NAME="mimiciv_manual_lambdarus${LAMBDA_RUS}_lambdaload${LAMBDA_LOAD}_gpu${GPU}"
+RUN_NAME="mimiciv_los_lambdarus${LAMBDA_RUS}_lambdaload${LAMBDA_LOAD}_gpu${GPU}"
 
 echo "Starting training with:"
 echo "  lambda_u = lambda_r = lambda_s = $LAMBDA_RUS"
@@ -45,9 +45,10 @@ echo "  wandb_run_name = $RUN_NAME"
 echo ""
 
 python ../src/train_mimiciv_multimodal.py \
-    --train_data_path ../../mimic-iv-preprocess/data/ihm/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl \
-    --val_data_path ../../mimic-iv-preprocess/data/ihm/val_ihm-48-cxr-notes-missingInd-standardized_stays.pkl \
-    --rus_data_path ../results/mimiciv/mimiciv_rus_multimodal_all.npy \
+    --train_data_path ../../mimic-iv-preprocess/data/los/train_los-cxr-notes-missingInd-standardized_stays.pkl \
+    --val_data_path ../../mimic-iv-preprocess/data/los/val_los-cxr-notes-missingInd-standardized_stays.pkl \
+    --rus_data_path ../results/mimiciv/los/rus_multimodal_all_meanpool.npy \
+    --task los \
     --truncate_from_end \
     --gpu $GPU \
     --use_wandb \

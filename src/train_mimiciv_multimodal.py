@@ -1,5 +1,11 @@
+"""
+Train a multimodal TRUS MoE model on MIMIC-IV data.
+Example usage:
+python train_mimiciv_multimodal.py --train_data_path /path/to/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl --val_data_path /path/to/val_ihm-48-cxr-notes-missingInd-standardized_stays.pkl --rus_data_path /path/to/rus_multimodal_all_meanpool.npy --task ihm --use_wandb --gpu 0
+python train_mimiciv_multimodal.py --train_data_path /path/to/train_los-cxr-notes-missingInd-standardized_stays.pkl --val_data_path /path/to/val_los-cxr-notes-missingInd-standardized_stays.pkl --rus_data_path /path/to/rus_multimodal_all_meanpool.npy --task los --use_wandb --gpu 0
+"""
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '1,2'
 import argparse
 from typing import Dict, List, Tuple
 from datetime import datetime
@@ -475,7 +481,7 @@ def main(args):
     if args.use_wandb:
         if args.wandb_run_name is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            args.wandb_run_name = f"mimiciv_multimodal_rus_moe_{timestamp}"
+            args.wandb_run_name = f"mimiciv_multimodal_rus_moe_{args.task}_{timestamp}"
             
         wandb.init(
             project=args.wandb_project,
@@ -498,20 +504,21 @@ def main(args):
     if device.type == "cuda":
         torch.cuda.manual_seed_all(args.seed)
 
-    # Load data
-    print(f"Loading train data from {args.train_data_path}...")
-    train_stays = pickle.load(open(args.train_data_path, 'rb'))
-    train_multimodal_reg_ts, train_labels = preprocess_mimiciv_data(train_stays)
-    print(f"Loading val data from {args.val_data_path}...")
-    val_stays = pickle.load(open(args.val_data_path, 'rb'))
-    val_multimodal_reg_ts, val_labels = preprocess_mimiciv_data(val_stays)
-
-    # Load RUS data
-    modality_names = sorted(train_multimodal_reg_ts[0].keys())
-    num_classes = len(np.unique(train_labels))
     modality_dim_dict = {'labs_vitals': 30,
                          'cxr': 1024,
                          'notes': 768}
+    # Load data
+    print(f"Loading train data from {args.train_data_path}...")
+    train_stays = pickle.load(open(args.train_data_path, 'rb'))
+    train_multimodal_reg_ts, train_labels = preprocess_mimiciv_data(train_stays, modality_dim_dict)
+    print(f"Loading val data from {args.val_data_path}...")
+    val_stays = pickle.load(open(args.val_data_path, 'rb'))
+    val_multimodal_reg_ts, val_labels = preprocess_mimiciv_data(val_stays, modality_dim_dict)
+
+    # Load RUS data
+    modality_names = sorted(list(modality_dim_dict.keys()))
+    num_classes = len(np.unique(train_labels))
+    
     
     # Calculate baseline accuracy (majority class)
     train_baseline_acc = 100.0 * max(np.bincount(train_labels)) / len(train_labels)
@@ -586,6 +593,8 @@ def main(args):
         "drop_tokens": args.moe_drop_tokens,
     }
 
+    print(f"Device: {device}")
+
     model = MultimodalTRUSMoEModel(
         modality_configs=modality_configs,
         d_model=args.d_model,
@@ -611,7 +620,7 @@ def main(args):
     
 
     
-    os.makedirs(os.path.join(args.output_dir, 'checkpoints', args.wandb_run_name), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, args.task, 'checkpoints', args.wandb_run_name), exist_ok=True)
 
     task_criterion = nn.CrossEntropyLoss()
     best_val_auc = -1.0
@@ -630,7 +639,7 @@ def main(args):
             best_val_auc = val_auc
             best_epoch = epoch
             
-            save_path = os.path.join(args.output_dir, 'checkpoints', args.wandb_run_name, f'best_multimodal_model_mimiciv.pth')
+            save_path = os.path.join(args.output_dir, args.task, 'checkpoints', args.wandb_run_name, f'best_multimodal_model_mimiciv.pth')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -655,7 +664,7 @@ def main(args):
         if args.plot_expert_activations and len(val_loader) > 0:
             print("\nGenerating expert activation plots for the best multimodal TRUS-MoE model...")
             
-            best_model_path = os.path.join(args.output_dir, 'checkpoints', args.wandb_run_name, f'best_multimodal_model_mimiciv.pth')
+            best_model_path = os.path.join(args.output_dir, args.task, 'checkpoints', args.wandb_run_name, f'best_multimodal_model_mimiciv.pth')
             if os.path.exists(best_model_path):
                 # Add argparse.Namespace to safe globals for PyTorch 2.6+ compatibility
                 torch.serialization.add_safe_globals([argparse.Namespace])
@@ -727,7 +736,7 @@ def main(args):
                 batch_rus = {k: v.to(device) for k, v in batch_rus.items()}
                 
                 # Generate plots
-                plot_save_dir = os.path.join(args.output_dir, 'expert_activation_plots', args.wandb_run_name)
+                plot_save_dir = os.path.join(args.output_dir, args.task, 'expert_activation_plots', args.wandb_run_name)
                 
                 try:
                     analyze_expert_activations(
@@ -751,6 +760,7 @@ if __name__ == "__main__":
     parser.add_argument('--train_data_path', type=str, required=True, help='Path to the training data')
     parser.add_argument('--val_data_path', type=str, required=True, help='Path to the validation data')
     parser.add_argument('--rus_data_path', type=str, required=True, help='Path to the RUS data')
+    parser.add_argument('--task', type=str, required=True, help='Task to train on')
     parser.add_argument('--seq_len', type=int, default=48, help='Sequence length (default 48 hours)')
     parser.add_argument('--truncate_from_end', action='store_true', 
                        help='Truncate sequences from the end (keep first timesteps). Default is to keep last timesteps.')
@@ -826,5 +836,6 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs(os.path.join(args.output_dir, 'checkpoints'), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, args.task), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, args.task, 'checkpoints'), exist_ok=True)
     main(args)
