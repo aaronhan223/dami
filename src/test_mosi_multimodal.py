@@ -13,13 +13,9 @@ import seaborn as sns
 from tqdm import tqdm
 
 # Import required modules
-from mimiciv_rus_multimodal import preprocess_mimiciv_data
 from trus_moe_multimodal import MultimodalTRUSMoEModel
-from train_mimiciv_multimodal import (
-    MultimodalMIMICIVDataset, 
-    collate_multimodal, 
-    load_mimiciv_rus_data
-)
+from train_mosi_multimodal import load_mosimosei_rus_data
+from multibench_affect_get_data import get_dataloader
 from utils.rus_utils import extend_rus_with_sequence_length
 from utils.checkpoint_utils import load_checkpoint, create_model_from_checkpoint
 from utils.evaluation_utils import print_evaluation_results, save_evaluation_plots
@@ -29,6 +25,7 @@ from utils.evaluation_utils import print_evaluation_results, save_evaluation_plo
 
 def evaluate_model(model: MultimodalTRUSMoEModel, 
                   dataloader: DataLoader, 
+                  rus_data: Dict,
                   device: torch.device,
                   dataset_name: str = "Test") -> Dict:
     """
@@ -48,12 +45,19 @@ def evaluate_model(model: MultimodalTRUSMoEModel,
     progress_bar = tqdm(dataloader, desc=f"Evaluating {dataset_name}")
     
     with torch.no_grad():
-        for batch_idx, (modality_data, modality_masks, rus_values_batch, labels) in enumerate(progress_bar):
-            # Move data to device
-            modality_data = [mod.to(device) for mod in modality_data]
-            modality_masks = [mask.to(device) for mask in modality_masks]
-            rus_values = {k: v.to(device) for k, v in rus_values_batch.items()}
-            labels = labels.to(device)
+        for batch_idx, (vision, audio, text, labels) in enumerate(progress_bar):
+            batch_size = vision.shape[0]
+            
+            # Prepare modality data
+            modality_data = [vision.to(device), audio.to(device), text.to(device)]
+            
+            # Prepare RUS values for this batch
+            rus_values = {
+                'U': torch.stack([rus_data['U'] for _ in range(batch_size)]).to(device),
+                'R': torch.stack([rus_data['R'] for _ in range(batch_size)]).to(device),
+                'S': torch.stack([rus_data['S'] for _ in range(batch_size)]).to(device)
+            }
+            labels = labels.squeeze(-1).to(device)
 
             # Forward pass
             seq_len = modality_data[0].shape[1]
@@ -134,20 +138,22 @@ def evaluate_model(model: MultimodalTRUSMoEModel,
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Test Multimodal TRUS-MoE Model on MIMIC-IV Data')
+    parser = argparse.ArgumentParser(description='Test Multimodal TRUS-MoE Model on MOSI/MOSEI Data')
     
     # Required arguments
     parser.add_argument('--checkpoint_path', type=str, required=True,
                        help='Path to the model checkpoint')
-    parser.add_argument('--test_data_path', type=str, required=True,
-                       help='Path to the test data')
+    parser.add_argument('--dataset_path', type=str, required=True,
+                       help='Path to the dataset')
     parser.add_argument('--rus_data_path', type=str, required=True,
                        help='Path to the RUS data')
+    parser.add_argument('--dataset', type=str, required=True, choices=['mosi', 'mosei'],
+                       help='Dataset to test on (mosi or mosei)')
     
     # Optional arguments
-    parser.add_argument('--output_dir', type=str, default='../results/mimiciv/',
+    parser.add_argument('--output_dir', type=str, default='../results/affect/',
                        help='Directory to save test results')
-    parser.add_argument('--batch_size', type=int, default=512,
+    parser.add_argument('--batch_size', type=int, default=32,
                        help='Batch size for testing')
     parser.add_argument('--num_workers', type=int, default=0,
                        help='Number of workers for DataLoader')
@@ -160,13 +166,9 @@ def main():
     
     # Additional evaluation options
     parser.add_argument('--eval_train', action='store_true',
-                       help='Also evaluate on training set (requires --train_data_path)')
-    parser.add_argument('--train_data_path', type=str, default=None,
-                       help='Path to training data (for training set evaluation)')
+                       help='Also evaluate on training set')
     parser.add_argument('--eval_val', action='store_true',
-                       help='Also evaluate on validation set (requires --val_data_path)')
-    parser.add_argument('--val_data_path', type=str, default=None,
-                       help='Path to validation data (for validation set evaluation)')
+                       help='Also evaluate on validation set')
     
     args = parser.parse_args()
     
@@ -179,52 +181,49 @@ def main():
         print("Using CPU")
     
     # Create output directory
+    args.output_dir = os.path.join(args.output_dir, args.dataset)
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Load checkpoint
-    model_state_dict, train_args, modality_configs, modality_names, best_val_auc = load_checkpoint(
+    model_state_dict, train_args, modality_configs, modality_names, best_val_acc = load_checkpoint(
         args.checkpoint_path, device)
-    
-    modality_dim_dict = {'labs_vitals': 30, 'cxr': 1024, 'notes': 768}
-    # Load test data
-    print(f"Loading test data from {args.test_data_path}...")
-    test_stays = pickle.load(open(args.test_data_path, 'rb'))
-    test_multimodal_reg_ts, test_labels = preprocess_mimiciv_data(test_stays, modality_dim_dict)
     
     # Load RUS data
     print(f"Loading RUS data from {args.rus_data_path}...")
-    rus_data = load_mimiciv_rus_data(args.rus_data_path, modality_names)
+    rus_data = load_mosimosei_rus_data(args.rus_data_path, modality_names)
     
-    # Get data info
-    num_classes = len(np.unique(test_labels))
+    # Load test data
+    print(f"Loading test data from {args.dataset_path}...")
+    train_loader, val_loader, test_loader = get_dataloader(
+        args.dataset_path, 
+        data_type=args.dataset, 
+        max_pad=True, 
+        task='classification', 
+        max_seq_len=train_args.seq_len, 
+        batch_size=args.batch_size
+    )
+    
+    # Get data info from a sample batch
+    sample_batch = next(iter(test_loader))
+    vision_sample, audio_sample, text_sample, labels_sample = sample_batch
+    num_classes = 2
     
     print(f"Test data info:")
-    print(f"  Number of samples: {len(test_multimodal_reg_ts)}")
+    print(f"  Vision shape: {vision_sample.shape}")
+    print(f"  Audio shape: {audio_sample.shape}")
+    print(f"  Text shape: {text_sample.shape}")
+    print(f"  Labels shape: {labels_sample.shape}")
     print(f"  Number of classes: {num_classes}")
-    print(f"  Class distribution: {np.bincount(test_labels)}")
     
+
     # Create model
     model = create_model_from_checkpoint(model_state_dict, train_args, modality_configs, num_classes, device)
     
-    # Create test dataset and dataloader
-    test_dataset = MultimodalMIMICIVDataset(
-        test_multimodal_reg_ts, test_labels, rus_data, modality_names, modality_dim_dict,
-        max_seq_len=train_args.seq_len, truncate_from_end=train_args.truncate_from_end
-    )
-    
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        collate_fn=collate_multimodal
-    )
-    
-    # Define class names (adjust based on your specific task)
-    class_names = ['Negative', 'Positive']  # Adjust for your specific classification task
+    # Define class names for MOSI/MOSEI (binary sentiment classification)
+    class_names = ['Negative', 'Positive']
     
     # Evaluate on test set
-    test_results = evaluate_model(model, test_loader, device, "Test")
+    test_results = evaluate_model(model, test_loader, rus_data, device, "Test")
     print_evaluation_results(test_results, "Test", class_names)
     
     # Save test plots
@@ -241,50 +240,18 @@ def main():
         print(f"Predictions saved to {predictions_path}")
     
     # Optional: Evaluate on training set
-    if args.eval_train and args.train_data_path:
-        print(f"\nLoading training data from {args.train_data_path}...")
-        train_stays = pickle.load(open(args.train_data_path, 'rb'))
-        train_multimodal_reg_ts, train_labels = preprocess_mimiciv_data(train_stays, modality_dim_dict)
-        
-        train_dataset = MultimodalMIMICIVDataset(
-            train_multimodal_reg_ts, train_labels, rus_data, modality_names, modality_dim_dict,
-            max_seq_len=train_args.seq_len, truncate_from_end=train_args.truncate_from_end
-        )
-        
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            collate_fn=collate_multimodal
-        )
-        
-        train_results = evaluate_model(model, train_loader, device, "Train")
+    if args.eval_train:
+        print(f"\nEvaluating on training set...")
+        train_results = evaluate_model(model, train_loader, rus_data, device, "Train")
         print_evaluation_results(train_results, "Train", class_names)
         
         if args.save_plots:
             save_evaluation_plots(train_results, args.output_dir, "Train", class_names)
     
     # Optional: Evaluate on validation set
-    if args.eval_val and args.val_data_path:
-        print(f"\nLoading validation data from {args.val_data_path}...")
-        val_stays = pickle.load(open(args.val_data_path, 'rb'))
-        val_multimodal_reg_ts, val_labels = preprocess_mimiciv_data(val_stays, modality_dim_dict)
-        
-        val_dataset = MultimodalMIMICIVDataset(
-            val_multimodal_reg_ts, val_labels, rus_data, modality_names, modality_dim_dict,
-            max_seq_len=train_args.seq_len, truncate_from_end=train_args.truncate_from_end
-        )
-        
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            collate_fn=collate_multimodal
-        )
-        
-        val_results = evaluate_model(model, val_loader, device, "Validation")
+    if args.eval_val:
+        print(f"\nEvaluating on validation set...")
+        val_results = evaluate_model(model, val_loader, rus_data, device, "Validation")
         print_evaluation_results(val_results, "Validation", class_names)
         
         if args.save_plots:
@@ -295,7 +262,7 @@ def main():
     print(f"TESTING COMPLETE")
     print(f"{'='*60}")
     print(f"Checkpoint: {args.checkpoint_path}")
-    print(f"Best training validation AU-ROC: {best_val_auc:.4f}")
+    print(f"Best training validation accuracy: {best_val_acc:.4f}")
     print(f"Test AU-ROC: {test_results['auc_score']:.4f}")
     print(f"Test Accuracy: {test_results['accuracy']:.4f} ({test_results['accuracy']*100:.2f}%)")
     print(f"Results saved to: {args.output_dir}")

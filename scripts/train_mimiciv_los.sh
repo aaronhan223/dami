@@ -35,7 +35,7 @@ if [[ ! "$GPU" =~ ^[0-9]+$ ]]; then
 fi
 
 # Create run name with hyperparameters
-RUN_NAME="mimiciv_los_lambdarus${LAMBDA_RUS}_lambdaload${LAMBDA_LOAD}_gpu${GPU}"
+RUN_NAME="mimiciv_los_lambdarus${LAMBDA_RUS}_lambdaload${LAMBDA_LOAD}"
 
 echo "Starting training with:"
 echo "  lambda_u = lambda_r = lambda_s = $LAMBDA_RUS"

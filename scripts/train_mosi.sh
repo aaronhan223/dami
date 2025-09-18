@@ -1,6 +1,6 @@
 #! /bin/bash
 
-# Best found: lambda_rus = 1.0, lambda_load = 0.02
+# Best found: lambda_rus = 2.0, lambda_load = 0.05
 
 # Check if correct number of arguments provided
 if [ $# -ne 3 ]; then
@@ -9,7 +9,7 @@ if [ $# -ne 3 ]; then
     echo "  lambda_load: Value for lambda_load (e.g., 0.02, 0.05)"
     echo "  gpu: GPU device ID (e.g., 0, 1, 2)"
     echo ""
-    echo "Example: $0 1.0 0.02 1"
+    echo "Example: $0 0.5 0.02 1"
     exit 1
 fi
 
@@ -17,6 +17,7 @@ fi
 LAMBDA_RUS=$1
 LAMBDA_LOAD=$2
 GPU=$3
+
 
 # Validate lambda_rus argument
 if [[ ! "$LAMBDA_RUS" =~ ^[0-9]*\.?[0-9]+$ ]]; then
@@ -36,8 +37,7 @@ if [[ ! "$GPU" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-# Create run name with hyperparameters
-RUN_NAME="mimiciv_ihm_lambdarus${LAMBDA_RUS}_lambdaload${LAMBDA_LOAD}"
+RUN_NAME="mosi_lambdarus${LAMBDA_RUS}_lambdaload${LAMBDA_LOAD}"
 
 echo "Starting training with:"
 echo "  lambda_u = lambda_r = lambda_s = $LAMBDA_RUS"
@@ -46,20 +46,16 @@ echo "  gpu = $GPU"
 echo "  wandb_run_name = $RUN_NAME"
 echo ""
 
-python ../src/train_mimiciv_multimodal.py \
-    --train_data_path ../../mimic-iv-preprocess/data/ihm/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl \
-    --val_data_path ../../mimic-iv-preprocess/data/ihm/val_ihm-48-cxr-notes-missingInd-standardized_stays.pkl \
-    --rus_data_path ../results/mimiciv/ihm/rus_multimodal_all_meanpool.npy \
-    --task ihm \
-    --truncate_from_end \
+python ../src/train_mosi_multimodal.py \
+    --dataset_path /mnt/d64c1162-08cc-4571-90a3-04c60b6f6f66/hhchung/mosi/mosi_raw.pkl \
+    --rus_data_path ../results/affect/mosi/rus_multimodal_all_meanpool.npy \
+    --dataset mosi \
     --gpu $GPU \
     --use_wandb \
-    --wandb_project mimiciv-multimodal-trus-moe \
-    --plot_expert_activations \
+    --wandb_project mosi-multimodal-trus-moe \
     --lambda_u $LAMBDA_RUS \
     --lambda_r $LAMBDA_RUS \
     --lambda_s $LAMBDA_RUS \
     --lambda_load $LAMBDA_LOAD \
     --run_name $RUN_NAME \
-    --lr 1e-3 \
-    --epochs 20
+    --epochs 25

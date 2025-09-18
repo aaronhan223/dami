@@ -39,7 +39,7 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
     -----------
     X1_list, X2_list: List[numpy.ndarray]
         Lists of time series, one per sequence
-    Y_list: List[numpy.ndarray]
+    Y_list: List[int]
         Classification labels for each sequence
     X1_masks, X2_masks: List[numpy.ndarray]
         Lists of binary masks indicating valid timesteps for each sequence
@@ -83,8 +83,7 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
         raise ValueError(f"X1_masks length ({len(X1_masks)}) must match X1_list length ({len(X1_list)})")
     if len(X2_masks) != len(X2_list):
         raise ValueError(f"X2_masks length ({len(X2_masks)}) must match X2_list length ({len(X2_list)})")
-    
-    
+
     # Set device
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -132,6 +131,7 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
         if len(X1_past) == 0:
             continue
 
+
         # Get masks for this sequence
         X1_mask = X1_masks[i]
         X2_mask = X2_masks[i]
@@ -166,7 +166,6 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
     all_X1_data = np.array(all_X1_data)
     all_X2_data = np.array(all_X2_data)
     all_Y_labels = np.array(all_Y_labels)
-    print(f"Numpy array shapes: X1={all_X1_data.shape}, X2={all_X2_data.shape}, Y={all_Y_labels.shape}")
 
     X1_tensor = torch.tensor(all_X1_data, dtype=torch.float32, device=device)
     X2_tensor = torch.tensor(all_X2_data, dtype=torch.float32, device=device)
@@ -177,7 +176,6 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
     Y_tensor = Y_tensor.view(-1)
     
     print(f"Using sequence pooling method: {sequence_pooling}")
-    print(f"Final tensor shapes: X1={X1_tensor.shape}, X2={X2_tensor.shape}, Y={Y_tensor.shape}")
 
 
     # Create train/test split
