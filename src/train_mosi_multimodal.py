@@ -1,11 +1,5 @@
-"""
-Train a multimodal TRUS MoE model on MIMIC-IV data.
-Example usage:
-python train_mimiciv_multimodal.py --train_data_path /path/to/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl --val_data_path /path/to/val_ihm-48-cxr-notes-missingInd-standardized_stays.pkl --rus_data_path /path/to/rus_multimodal_all_meanpool.npy --task ihm --use_wandb --gpu 0
-python train_mimiciv_multimodal.py --train_data_path /path/to/train_los-cxr-notes-missingInd-standardized_stays.pkl --val_data_path /path/to/val_los-cxr-notes-missingInd-standardized_stays.pkl --rus_data_path /path/to/rus_multimodal_all_meanpool.npy --task los --use_wandb --gpu 0
-"""
 import os
-# os.environ['CUDA_VISIBLE_DEVICES'] = '1,2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
 import argparse
 from typing import Dict, List, Tuple
 from datetime import datetime
@@ -15,20 +9,17 @@ import numpy as np
 from tqdm import tqdm
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
 import wandb
-from sklearn.metrics import roc_auc_score
-from mimiciv_rus_multimodal import preprocess_mimiciv_data
 from trus_moe_multimodal import MultimodalTRUSMoEModel
 from trus_moe_model import calculate_rus_losses, calculate_load_balancing_loss
 from plot_expert_activation import analyze_expert_activations
+from multibench_affect_get_data import get_dataloader
 from utils.rus_utils import extend_rus_with_sequence_length
 
-
-def load_mimiciv_rus_data(rus_filepath: str, modality_names: List[str]) -> Dict[str, torch.Tensor]:
+def load_mosimosei_rus_data(rus_filepath: str, modality_names: List[str]) -> Dict[str, torch.Tensor]:
     """
-    Loads MIMIC-IV RUS data.
+    Loads MOSI/MOSEI RUS data.
     """
     if not os.path.exists(rus_filepath):
         raise FileNotFoundError(f"RUS data file not found: {rus_filepath}")
@@ -84,154 +75,9 @@ def load_mimiciv_rus_data(rus_filepath: str, modality_names: List[str]) -> Dict[
         pairs_loaded += 1
     
     return {'U': U, 'R': R, 'S': S}
-        
-class MultimodalMIMICIVDataset(Dataset):
-    """
-    PyTorch Dataset for multimodal MIMIC-IV data.
-    """
-    def __init__(self, multimodal_reg_ts: List[Dict[str, Tuple[np.ndarray, np.ndarray]]], labels: List[int], rus_data: Dict[str, torch.Tensor], modality_names: List[str], modality_dim_dict: Dict[str, int], max_seq_len: int = None, truncate_from_end: bool = True):
-        # Convert all numpy arrays in multimodal_reg_ts to torch tensors
-        # Sort modality keys to ensure consistent ordering across samples
-        self.multimodal_reg_ts = []
-        self.max_seq_len = max_seq_len
-        self.truncate_from_end = truncate_from_end
-        self.modality_names = sorted(modality_names)
-        self.modality_dim_dict = modality_dim_dict
-        # If max_seq_len is not provided, calculate it from the data
-        if self.max_seq_len is None:
-            max_len = 0
-            seq_lengths = []
-            for sample in multimodal_reg_ts:
-                for modality, (features, mask) in sample.items():
-                    seq_len = len(features)
-                    max_len = max(max_len, seq_len)
-                    seq_lengths.append(seq_len)
-            self.max_seq_len = max_len
-            print(f"Auto-detected max sequence length: {self.max_seq_len}")
-            print(f"Sequence length statistics: min={min(seq_lengths)}, max={max(seq_lengths)}, mean={np.mean(seq_lengths):.1f}")
-        else:
-            print(f"Using specified max sequence length: {self.max_seq_len}")
-            print(f"Truncation strategy: {'from end (keep first)' if self.truncate_from_end else 'from beginning (keep last)'}")
-        
-        # Initialize counters for statistics
-        self.truncated_count = 0
-        self.padded_count = 0
-        
-        for sample in multimodal_reg_ts:
-            converted_sample = {}
-            for modality in self.modality_names:
-                if modality in sample:
-                    features, mask = sample[modality]
-                    # Convert numpy arrays to torch tensors
-                    features_tensor = torch.from_numpy(features).float()
-                    mask_tensor = torch.from_numpy(mask).bool()
-                    # Apply truncation and padding
-                    features_tensor, mask_tensor = self._truncate_and_pad(features_tensor, mask_tensor)
-                else:
-                    features_tensor, mask_tensor = torch.zeros(self.max_seq_len, self.modality_dim_dict[modality]), torch.zeros(self.max_seq_len, dtype=torch.bool)
-                
-                converted_sample[modality] = (features_tensor, mask_tensor)
-            self.multimodal_reg_ts.append(converted_sample)
-        
-        # Convert numpy labels to Python integers to avoid tensor stacking issues
-        self.labels = [int(label) for label in labels]
-        self.rus_data = rus_data
-        self.dataset_size = len(multimodal_reg_ts)
-        
-        # Print truncation/padding statistics
-        if hasattr(self, 'truncated_count') and hasattr(self, 'padded_count'):
-            print(f"Dataset preprocessing complete:")
-            print(f"  Total samples: {self.dataset_size}")
-            print(f"  Truncated sequences: {self.truncated_count}")
-            print(f"  Padded sequences: {self.padded_count}")
-            print(f"  No change needed: {self.dataset_size - self.truncated_count - self.padded_count}")
-
-    def _truncate_and_pad(self, features: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Truncate or pad features and mask to match max_seq_len.
-        
-        Args:
-            features: Tensor of shape (T, D) where T is current sequence length
-            mask: Tensor of shape (T,) indicating valid timesteps
-            
-        Returns:
-            Tuple of (padded_features, padded_mask) both with length max_seq_len
-        """
-        current_len = features.size(0)
-        feature_dim = features.size(1)
-        
-        if current_len > self.max_seq_len:
-            # Truncate based on truncate_from_end parameter
-            if self.truncate_from_end:
-                # Keep the first max_seq_len timesteps
-                features = features[:self.max_seq_len]
-                mask = mask[:self.max_seq_len]
-            else:
-                # Keep the last max_seq_len timesteps (most recent)
-                features = features[-self.max_seq_len:]
-                mask = mask[-self.max_seq_len:]
-            self.truncated_count += 1
-        elif current_len < self.max_seq_len:
-            # Pad with zeros for features and False for mask
-            pad_len = self.max_seq_len - current_len
-            
-            # Pad features with zeros
-            feature_padding = torch.zeros(pad_len, feature_dim, dtype=features.dtype)
-            features = torch.cat([features, feature_padding], dim=0)
-            
-            # Pad mask with False (indicating padded timesteps are invalid)
-            mask_padding = torch.zeros(pad_len, dtype=mask.dtype)
-            mask = torch.cat([mask, mask_padding], dim=0)
-            self.padded_count += 1
-        
-        return features, mask
-
-    def __len__(self):
-        return self.dataset_size
-
-    def __getitem__(self, idx):
-        return self.multimodal_reg_ts[idx], self.rus_data, self.labels[idx]
 
 
-def collate_multimodal(batch):
-    # Get sorted modality names from the first sample to ensure consistent ordering
-    sorted_modality_names = sorted(batch[0][0].keys())
-    
-    modality_data_lists = [[] for _ in range(len(sorted_modality_names))]  # One list per modality
-    modality_mask_lists = [[] for _ in range(len(sorted_modality_names))]  # One list per modality for masks
-    rus_data_batch = {'U': [], 'R': [], 'S': []}
-    labels = []
-    
-    for item in batch:
-        modality_tensors, rus_dict, label = item
-        
-        for i, modality in enumerate(sorted_modality_names):
-            features, mask = modality_tensors[modality]
-            modality_data_lists[i].append(features)  # feature tensor
-            modality_mask_lists[i].append(mask)      # mask tensor
-        
-        rus_data_batch['U'].append(rus_dict['U'])
-        rus_data_batch['R'].append(rus_dict['R'])
-        rus_data_batch['S'].append(rus_dict['S'])
-        
-        labels.append(label)
-    
-    # Stack data
-    modality_batches = [torch.stack(mod_list) for mod_list in modality_data_lists]
-    modality_mask_batches = [torch.stack(mask_list) for mask_list in modality_mask_lists]
-    rus_batches = {k: torch.stack(v) for k, v in rus_data_batch.items()}
-    label_batch = torch.tensor(labels, dtype=torch.long)
-    return modality_batches, modality_mask_batches, rus_batches, label_batch
-
-
-def train_epoch_multimodal_mimiciv(model: MultimodalTRUSMoEModel,
-                                   dataloader: DataLoader,
-                                   optimizer: optim.Optimizer,
-                                   task_criterion: nn.Module,
-                                   device: torch.device,
-                                   args: argparse.Namespace,
-                                   current_epoch: int):
-    """Runs one training epoch for multimodal model."""
+def train_epoch_multimodal(model, dataloader, rus_data, optimizer, task_criterion, device, args, current_epoch):
     model.train()
     total_loss_accum = 0.0
     task_loss_accum = 0.0
@@ -241,17 +87,27 @@ def train_epoch_multimodal_mimiciv(model: MultimodalTRUSMoEModel,
     load_loss_accum = 0.0
     correct_predictions = 0
     total_samples = 0
-    all_scores = []
-    all_labels = []
 
     progress_bar = tqdm(dataloader, desc=f"Epoch {current_epoch+1}/{args.epochs} [Train]", leave=False)
 
-    for batch_idx, (modality_data, modality_masks, rus_values_batch, labels) in enumerate(progress_bar):
-        # Move data to device
-        modality_data = [mod.to(device) for mod in modality_data]
-        modality_masks = [mask.to(device) for mask in modality_masks]
-        rus_values = {k: v.to(device) for k, v in rus_values_batch.items()}
-        labels = labels.to(device)
+    for batch_idx, (vision, audio, text, labels) in enumerate(progress_bar):
+        batch_size = vision.shape[0]
+        modality_data = [vision.to(device), audio.to(device), text.to(device)]
+        rus_values = {
+            'U': torch.stack([rus_data['U'] for _ in range(batch_size)]).to(device),
+            'R': torch.stack([rus_data['R'] for _ in range(batch_size)]).to(device),
+            'S': torch.stack([rus_data['S'] for _ in range(batch_size)]).to(device)
+        }
+        labels = labels.squeeze(-1).to(device)
+
+        # print(f"Batch {batch_idx} size: {batch_size}")
+        # print(f"RUS values shape: {rus_values['U'].shape}")
+        # print(f"RUS values shape: {rus_values['R'].shape}")
+        # print(f"RUS values shape: {rus_values['S'].shape}")
+        # print(f"Labels shape: {labels.shape}")
+        # print(f"Modality data shape: {modality_data[0].shape}")
+        # print(f"Modality data shape: {modality_data[1].shape}")
+        # print(f"Modality data shape: {modality_data[2].shape}")
 
         optimizer.zero_grad()
 
@@ -269,13 +125,12 @@ def train_epoch_multimodal_mimiciv(model: MultimodalTRUSMoEModel,
         total_L_synergy = torch.tensor(0.0, device=device)
         total_L_load = torch.tensor(0.0, device=device)
         num_moe_layers = len(all_aux_moe_outputs)
-        
+
         for aux_outputs in all_aux_moe_outputs:
             gating_probs = aux_outputs['gating_probs']  # (B, M, T, N_exp)
             expert_indices = aux_outputs['expert_indices']  # (B, T, k)
             
             # Get synergy expert indices from the model
-            
             # This is a bit tricky since we need to access the actual MoE layer
             # For now, we'll use a fixed set based on configuration
             num_experts = gating_probs.size(-1)
@@ -289,59 +144,49 @@ def train_epoch_multimodal_mimiciv(model: MultimodalTRUSMoEModel,
                 epsilon=args.epsilon_loss
             )
             
-
             # Calculate load balancing loss
             k = args.moe_k
             L_load = calculate_load_balancing_loss(gating_probs, expert_indices, k, args.lambda_load)
-
+            
             total_L_unique += L_unique
             total_L_redundancy += L_redundancy
             total_L_synergy += L_synergy
             total_L_load += L_load
-
+        
         if num_moe_layers > 0:
             total_L_unique /= num_moe_layers
             total_L_redundancy /= num_moe_layers
             total_L_synergy /= num_moe_layers
             total_L_load /= num_moe_layers
-
+        
         # Combine Losses
         total_loss = task_loss + total_L_unique + total_L_redundancy + total_L_synergy + total_L_load
+        
+        total_loss.backward()
+        if args.clip_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_grad_norm)
+        optimizer.step()
+        
+        # Accumulate losses and accuracy
+        total_loss_accum += total_loss.item()
+        task_loss_accum += task_loss.item()
+        unique_loss_accum += total_L_unique.item()
+        redundancy_loss_accum += total_L_redundancy.item()
+        synergy_loss_accum += total_L_synergy.item()
+        load_loss_accum += total_L_load.item()
 
-        # Backward pass and optimize
-        if torch.isnan(total_loss) or torch.isinf(total_loss):
-            print(f"Warning: NaN or Inf detected in total loss at batch {batch_idx}. Skipping.")
-        else:
-            total_loss.backward()
-            if args.clip_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_grad_norm)
-            optimizer.step()
-            
-            # Accumulate losses and accuracy
-            total_loss_accum += total_loss.item()
-            task_loss_accum += task_loss.item()
-            unique_loss_accum += total_L_unique.item()
-            redundancy_loss_accum += total_L_redundancy.item()
-            synergy_loss_accum += total_L_synergy.item()
-            load_loss_accum += total_L_load.item()
-            
-            predictions = torch.argmax(final_logits, dim=1)
-            correct_predictions += (predictions == labels).sum().item()
-            total_samples += labels.size(0)
-            
-            # Store scores and labels for AU-ROC calculation
-            probs = torch.softmax(final_logits, dim=1)[:, 1]  # Get probability of positive class
-            all_scores.extend(probs.detach().cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            
-            # Update progress bar
-            if total_samples > 0:
-                current_acc = 100. * correct_predictions / total_samples
-                progress_bar.set_postfix({
-                    'Loss': f"{total_loss.item():.4f}",
-                    'TaskL': f"{task_loss.item():.4f}",
-                    'Acc': f"{current_acc:.2f}%"
-                })
+        predictions = torch.argmax(final_logits, dim=1)
+        correct_predictions += (predictions == labels).sum().item()
+        total_samples += labels.size(0)
+
+        # Update progress bar
+        if total_samples > 0:
+            current_acc = 100. * correct_predictions / total_samples
+            progress_bar.set_postfix({
+                'Loss': f"{total_loss.item():.4f}",
+                'TaskL': f"{task_loss.item():.4f}",
+                'Acc': f"{current_acc:.2f}%"
+            })
     
     # Calculate average losses and accuracy
     num_batches = len(dataloader)
@@ -355,14 +200,7 @@ def train_epoch_multimodal_mimiciv(model: MultimodalTRUSMoEModel,
     avg_synergy_loss = synergy_loss_accum / num_batches
     avg_load_loss = load_loss_accum / num_batches
     accuracy = 100. * correct_predictions / total_samples if total_samples > 0 else 0.0
-    
-    # Calculate AU-ROC
-    try:
-        auc_score = roc_auc_score(all_labels, all_scores) if len(all_labels) > 0 else 0.0
-    except ValueError:
-        auc_score = 0.0  # In case all labels are the same class
 
-    # Log metrics to wandb
     if args.use_wandb:
         wandb.log({
             "train/total_loss": avg_total_loss,
@@ -372,34 +210,34 @@ def train_epoch_multimodal_mimiciv(model: MultimodalTRUSMoEModel,
             "train/synergy_loss": avg_synergy_loss,
             "train/load_balancing_loss": avg_load_loss,
             "train/accuracy": accuracy,
-            "train/auc": auc_score,
             "epoch": current_epoch + 1
         })
     
     print(f"Epoch {current_epoch+1} [Train] Avg Loss: {avg_total_loss:.4f}, "
-          f"Task Loss: {avg_task_loss:.4f}, Accuracy: {accuracy:.2f}%, AU-ROC: {auc_score:.4f}")
+          f"Task Loss: {avg_task_loss:.4f}, Accuracy: {accuracy:.2f}%")
     print(f"  Aux Losses -> Unique: {avg_unique_loss:.4f}, Redundancy: {avg_redundancy_loss:.4f}, "
           f"Synergy: {avg_synergy_loss:.4f}, Load: {avg_load_loss:.4f}")
     
-    return avg_total_loss, auc_score
+    return avg_total_loss, accuracy
 
-def eval_epoch_multimodal_mimiciv(model: MultimodalTRUSMoEModel, dataloader: DataLoader, task_criterion: nn.Module, device: torch.device, args: argparse.Namespace, current_epoch: int):
+def eval_epoch_multimodal(model, dataloader, rus_data, task_criterion, device, args, current_epoch):
     model.eval()
     task_loss_accum = 0.0
     correct_predictions = 0
     total_samples = 0
-    all_scores = []
-    all_labels = []
     
     progress_bar = tqdm(dataloader, desc=f"Epoch {current_epoch+1}/{args.epochs} [Val]", leave=False)
-    
+
     with torch.no_grad():
-        for batch_idx, (modality_data, modality_masks, rus_values_batch, labels) in enumerate(progress_bar):
-            # Move data to device
-            modality_data = [mod.to(device) for mod in modality_data]
-            modality_masks = [mask.to(device) for mask in modality_masks]
-            rus_values = {k: v.to(device) for k, v in rus_values_batch.items()}
-            labels = labels.to(device)
+        for batch_idx, (vision, audio, text, labels) in enumerate(progress_bar):
+            batch_size = vision.shape[0]
+            modality_data = [vision.to(device), audio.to(device), text.to(device)]
+            rus_values = {
+                'U': torch.stack([rus_data['U'] for _ in range(batch_size)]).to(device),
+                'R': torch.stack([rus_data['R'] for _ in range(batch_size)]).to(device),
+                'S': torch.stack([rus_data['S'] for _ in range(batch_size)]).to(device)
+            }
+            labels = labels.squeeze(-1).to(device)
 
             # Forward pass
             seq_len = modality_data[0].shape[1]
@@ -414,11 +252,6 @@ def eval_epoch_multimodal_mimiciv(model: MultimodalTRUSMoEModel, dataloader: Dat
             predictions = torch.argmax(final_logits, dim=1)
             correct_predictions += (predictions == labels).sum().item()
             total_samples += labels.size(0)
-            
-            # Store scores and labels for AU-ROC calculation
-            probs = torch.softmax(final_logits, dim=1)[:, 1]  # Get probability of positive class
-            all_scores.extend(probs.detach().cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
 
             if total_samples > 0:
                 current_acc = 100. * correct_predictions / total_samples
@@ -434,31 +267,23 @@ def eval_epoch_multimodal_mimiciv(model: MultimodalTRUSMoEModel, dataloader: Dat
     
     avg_task_loss = task_loss_accum / num_batches
     accuracy = 100. * correct_predictions / total_samples if total_samples > 0 else 0.0
-    
-    # Calculate AU-ROC
-    try:
-        auc_score = roc_auc_score(all_labels, all_scores) if len(all_labels) > 0 else 0.0
-    except ValueError:
-        auc_score = 0.0  # In case all labels are the same class
 
-    # Log validation metrics to wandb
     if args.use_wandb:
         wandb.log({
             "val/task_loss": avg_task_loss,
             "val/accuracy": accuracy,
-            "val/auc": auc_score,
             "epoch": current_epoch + 1
         })
     
-    print(f"Epoch {current_epoch+1} [Val] Avg Task Loss: {avg_task_loss:.4f}, Accuracy: {accuracy:.2f}%, AU-ROC: {auc_score:.4f}")
+    print(f"Epoch {current_epoch+1} [Val] Avg Task Loss: {avg_task_loss:.4f}, Accuracy: {accuracy:.2f}%")
     
-    return avg_task_loss, auc_score
+    return avg_task_loss, accuracy
 
 def main(args):
 
     if args.run_name is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.run_name = f"mimiciv_multimodal_rus_moe_{args.task}_{timestamp}"
+        args.run_name = f"mosi_multimodal_rus_moe_{args.dataset}_{timestamp}"
 
     # Set up wandb
 
@@ -484,65 +309,31 @@ def main(args):
     torch.manual_seed(args.seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(args.seed)
-
-    modality_dim_dict = {'labs_vitals': 30,
-                         'cxr': 1024,
-                         'notes': 768}
-    # Load data
-    print(f"Loading train data from {args.train_data_path}...")
-    train_stays = pickle.load(open(args.train_data_path, 'rb'))
-    train_multimodal_reg_ts, train_labels = preprocess_mimiciv_data(train_stays, modality_dim_dict)
-    print(f"Loading val data from {args.val_data_path}...")
-    val_stays = pickle.load(open(args.val_data_path, 'rb'))
-    val_multimodal_reg_ts, val_labels = preprocess_mimiciv_data(val_stays, modality_dim_dict)
-
-    # Load RUS data
-    modality_names = sorted(list(modality_dim_dict.keys()))
-    num_classes = len(np.unique(train_labels))
     
+    if args.dataset == 'mosi':   
+        modality_dim_dict = {
+            'vision': 35,
+            'audio': 74,
+            'text': 300,
+        }
+    elif args.dataset == 'mosei':
+        modality_dim_dict = {
+            'vision': 713,
+            'audio': 74,
+            'text': 300,
+        }
+    else:
+        raise ValueError(f"Invalid dataset: {args.dataset}")
     
-    # Calculate baseline accuracy (majority class)
-    train_baseline_acc = 100.0 * max(np.bincount(train_labels)) / len(train_labels)
-    val_baseline_acc = 100.0 * max(np.bincount(val_labels)) / len(val_labels)
-    print(f"\nBaseline Accuracy (Majority Class): Train={train_baseline_acc:.2f}%, Val={val_baseline_acc:.2f}%")
+    print(f"Modality dimensions: {modality_dim_dict}")
+
+    print(f"Loading data...")
+    modality_names = ['vision', 'audio', 'text']
+    rus_data = load_mosimosei_rus_data(args.rus_data_path, modality_names)
+    train_loader, val_loader, _ = get_dataloader(args.dataset_path, data_type=args.dataset, max_pad=True, task='classification', max_seq_len=args.seq_len, batch_size=args.batch_size)
+
     
-    rus_data = load_mimiciv_rus_data(args.rus_data_path, modality_names)
-    
-
-    print(f"train multimodal reg ts: {train_multimodal_reg_ts[0].keys()}")
-
-    # Create dataset
-    train_dataset = MultimodalMIMICIVDataset(
-        train_multimodal_reg_ts, train_labels, rus_data, modality_names, modality_dim_dict,
-        max_seq_len=args.seq_len, truncate_from_end=args.truncate_from_end
-    )
-
-    val_dataset = MultimodalMIMICIVDataset(
-        val_multimodal_reg_ts, val_labels, rus_data, modality_names, modality_dim_dict,
-        max_seq_len=args.seq_len, truncate_from_end=args.truncate_from_end
-    )
-
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        collate_fn=collate_multimodal
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        collate_fn=collate_multimodal
-    )
-
-    # Create modality configs
     modality_configs = []
-    # modality_dim_dict = dict()
-    # for mod_name in modality_names:
-    #     modality_dim_dict[mod_name] = train_multimodal_reg_ts[0][mod_name][0].shape[1]
 
     for mod_name in modality_names:
         config = {
@@ -584,7 +375,7 @@ def main(args):
         num_encoder_layers=args.num_encoder_layers,
         num_moe_layers=args.num_moe_layers,
         moe_config=moe_layer_config,
-        num_classes=num_classes,
+        num_classes=2,
         max_seq_len=args.seq_len,
         dropout=args.dropout,
         use_checkpoint=args.use_gradient_checkpointing,
@@ -598,54 +389,52 @@ def main(args):
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     else:
         scheduler = None
-    
 
-    
-    os.makedirs(os.path.join(args.output_dir, args.task, 'checkpoints', args.run_name), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, 'checkpoints', args.run_name), exist_ok=True)
 
     task_criterion = nn.CrossEntropyLoss()
-    best_val_auc = -1.0
+    best_val_acc = -1.0
     best_epoch = -1
 
     for epoch in range(args.epochs):
-        train_loss, train_auc = train_epoch_multimodal_mimiciv(
-            model, train_loader, optimizer, task_criterion, device, args, epoch
+        train_loss, train_acc = train_epoch_multimodal(
+            model, train_loader, rus_data, optimizer, task_criterion, device, args, epoch
         )
 
-        val_loss, val_auc = eval_epoch_multimodal_mimiciv(
-            model, val_loader, task_criterion, device, args, epoch
+        val_loss, val_acc = eval_epoch_multimodal(
+            model, val_loader, rus_data, task_criterion, device, args, epoch
         )
 
-        if val_auc > best_val_auc:
-            best_val_auc = val_auc
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
             best_epoch = epoch
-            
-            save_path = os.path.join(args.output_dir, args.task, 'checkpoints', args.run_name, f'best_multimodal_model_mimiciv.pth')
+
+            save_path = os.path.join(args.output_dir, 'checkpoints', args.run_name, f'best_multimodal_model_{args.dataset}.pth')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'best_val_auc': best_val_auc,
+                'best_val_acc': best_val_acc,
                 'args': args,
                 'modality_configs': modality_configs,
                 'modality_names': modality_names,
             }, save_path)
-            print(f"Epoch {epoch+1}: New best validation AU-ROC: {val_auc:.4f}. Model saved.")
+            print(f"Epoch {epoch+1}: New best validation accuracy: {val_acc:.2f}%. Model saved.")
 
             if args.use_wandb:
-                wandb.log({"best_val_auc": best_val_auc, "best_epoch": epoch + 1})
-            
+                wandb.log({"best_val_acc": best_val_acc, "best_epoch": epoch + 1})
+
         if scheduler is not None:
             scheduler.step()
-            
+
     print("Training finished.")
     if best_epoch != -1:
-        print(f"Best Validation AU-ROC: {best_val_auc:.4f} at epoch {best_epoch+1}")
+        print(f"Best Validation Accuracy: {best_val_acc:.4f}% at epoch {best_epoch+1}")
 
         if args.plot_expert_activations and len(val_loader) > 0:
             print("\nGenerating expert activation plots for the best multimodal TRUS-MoE model...")
             
-            best_model_path = os.path.join(args.output_dir, args.task, 'checkpoints', args.run_name, f'best_multimodal_model_mimiciv.pth')
+            best_model_path = os.path.join(args.output_dir, 'checkpoints', args.run_name, f'best_multimodal_model_{args.dataset}.pth')
             if os.path.exists(best_model_path):
                 # Add argparse.Namespace to safe globals for PyTorch 2.6+ compatibility
                 torch.serialization.add_safe_globals([argparse.Namespace])
@@ -660,7 +449,7 @@ def main(args):
                     num_encoder_layers=args.num_encoder_layers,
                     num_moe_layers=args.num_moe_layers,
                     moe_config=moe_layer_config,
-                    num_classes=num_classes,
+                    num_classes=2,
                     max_seq_len=args.seq_len,
                     dropout=args.dropout,
                     use_checkpoint=args.use_gradient_checkpointing,
@@ -670,45 +459,9 @@ def main(args):
                 plot_model.load_state_dict(checkpoint['model_state_dict'])
                 plot_model.eval()
                 
-                # # Get a batch of validation data (manual approach - commented out)
-                # val_batch_modalities = []
-                # val_batch_rus = []
-                # num_plot_samples = min(args.plot_num_samples, len(val_dataset))
-                # 
-                # for i in range(num_plot_samples):
-                #     modality_data, rus_data, _ = val_dataset[i]
-                #     val_batch_modalities.append(modality_data)
-                #     val_batch_rus.append(rus_data)
-                # 
-                # # Stack into batch format
-                # batch_modalities = [[] for _ in range(len(val_batch_modalities[0]))]
-                # for sample_modalities in val_batch_modalities:
-                #     for mod_idx, (mod_name, (features, _)) in enumerate(sorted(sample_modalities.items())):
-                #         batch_modalities[mod_idx].append(features)
-                # 
-                # # Stack each modality
-                # batch_modalities = [torch.stack(mod_list).to(device) for mod_list in batch_modalities]
-                # 
-                # # Stack RUS data
-                # batch_rus = {'U': [], 'R': [], 'S': []}
-                # for rus_data in val_batch_rus:
-                #     batch_rus['U'].append(rus_data['U'])
-                #     batch_rus['R'].append(rus_data['R'])
-                #     batch_rus['S'].append(rus_data['S'])
-                # batch_rus = {k: torch.stack(v).to(device) for k, v in batch_rus.items()}
-                
-                # Use validation dataloader for consistency (safer approach)
-                print(f"Getting {args.plot_num_samples} samples from validation dataloader for expert activation plotting...")
-                
-                # Create a temporary dataloader with the desired batch size for plotting
-                plot_loader = DataLoader(
-                    val_dataset,
-                    batch_size=args.plot_num_samples,
-                    shuffle=False,
-                    num_workers=0,
-                    collate_fn=collate_multimodal
-                )
-                
+                # Get a batch of validation data
+                plot_loader = get_dataloader(args.dataset_path, data_type=args.dataset, max_pad=True, task='classification', max_seq_len=args.seq_len, batch_size=args.plot_num_samples)
+
                 plot_iter = iter(plot_loader)
                 batch_modalities, batch_masks, batch_rus, batch_labels = next(plot_iter)
                 batch_rus = extend_rus_with_sequence_length(batch_rus, batch_modalities[0].shape[1])
@@ -717,8 +470,8 @@ def main(args):
                 batch_rus = {k: v.to(device) for k, v in batch_rus.items()}
                 
                 # Generate plots
-                plot_save_dir = os.path.join(args.output_dir, args.task, 'expert_activation_plots', args.run_name)
-                
+                plot_save_dir = os.path.join(args.output_dir, 'expert_activation_plots', args.run_name)
+
                 try:
                     analyze_expert_activations(
                         trus_model=plot_model,
@@ -731,18 +484,25 @@ def main(args):
                     print(f"Expert activation plots saved to {plot_save_dir}")
                 except Exception as e:
                     print(f"Error generating expert activation plots: {e}")
-                    
+
             else:
                 print(f"Best model checkpoint not found at {best_model_path}")
 
+        else:
+            print("Training finished (no validation performed or no improvement).")
+
+    # Finish wandb run
+    if args.use_wandb:
+        wandb.finish()
+                
+    
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train Multimodal TRUS-MoE Model on MIMIC-IV Data')
-    parser.add_argument('--train_data_path', type=str, required=True, help='Path to the training data')
-    parser.add_argument('--val_data_path', type=str, required=True, help='Path to the validation data')
+    parser = argparse.ArgumentParser(description='Train Multimodal TRUS-MoE Model on MOSI/MOSEI Data')
+    parser.add_argument('--dataset_path', type=str, required=True, help='Path to the dataset')
     parser.add_argument('--rus_data_path', type=str, required=True, help='Path to the RUS data')
-    parser.add_argument('--task', type=str, required=True, help='Task to train on')
-    parser.add_argument('--seq_len', type=int, default=48, help='Sequence length (default 48 hours)')
+    parser.add_argument('--dataset', type=str, required=True, help='Dataset to train on')
+    parser.add_argument('--seq_len', type=int, default=50, help='Sequence length')
     parser.add_argument('--truncate_from_end', action='store_true', 
                        help='Truncate sequences from the end (keep first timesteps). Default is to keep last timesteps.')
     # parser.add_argument('--rus_max_lag', type=int, default=10, help='Max lag used in RUS data')
@@ -777,7 +537,7 @@ if __name__ == "__main__":
     
     # Training args
     parser.add_argument('--epochs', type=int, default=20, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=512, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
     parser.add_argument('--clip_grad_norm', type=float, default=1.0, 
@@ -800,12 +560,12 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--num_workers', type=int, default=0, help='Number of workers for DataLoader')
     parser.add_argument('--gpu', type=int, default=None, help='GPU device ID to use. If None, will use CPUs.')
-    parser.add_argument('--output_dir', type=str, default='../results/mimiciv/', 
+    parser.add_argument('--output_dir', type=str, default='../results/affect/', 
                        help='Directory to save results/models')
     
     # Wandb args
     parser.add_argument('--use_wandb', action='store_true', help='Enable Weights & Biases logging')
-    parser.add_argument('--wandb_project', type=str, default='mimiciv-multimodal-trus-moe', 
+    parser.add_argument('--wandb_project', type=str, default='mosi-multimodal-trus-moe', 
                        help='wandb project name')
     parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity/username')
     parser.add_argument('--run_name', type=str, default=None, help='run name')
@@ -816,7 +576,7 @@ if __name__ == "__main__":
     parser.add_argument('--plot_num_samples', type=int, default=32, help='Number of samples to use for expert activation plotting')
     
     args = parser.parse_args()
+    args.output_dir = os.path.join(args.output_dir, args.dataset)
     os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs(os.path.join(args.output_dir, args.task), exist_ok=True)
-    os.makedirs(os.path.join(args.output_dir, args.task, 'checkpoints'), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, 'checkpoints'), exist_ok=True)
     main(args)

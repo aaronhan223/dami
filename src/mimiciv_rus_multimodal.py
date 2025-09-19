@@ -1,6 +1,19 @@
-# This script computes the RUS of the time series of a stay in MIMIC-IV
+"""
+This script computes the RUS of the time series of a stay in MIMIC-IV
+Example usage for in-hospital mortality:
+1. Linear interpolation + timestep pooling (no pooling)
+python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl --task ihm --linear_interpolation
+
+2. Mean pooling
+python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl --task ihm --sequence_pooling mean
+
+Example usage for length of stay:
+python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_los-48-cxr-notes-missingInd-standardized_stays.pkl --task los --linear_interpolation
+python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_los-48-cxr-notes-missingInd-standardized_stays.pkl --task los --sequence_pooling mean
+"""
+
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 import argparse
 import pickle
 import numpy as np
@@ -19,14 +32,14 @@ from estimators.ce_alignment_information import (
 def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, X2_masks, lag=1, batch_size=256, n_batches=10, 
                       discrim_epochs=20, ce_epochs=10, seed=42, device=None,
                       hidden_dim=32, layers=2, activation='relu', lr=1e-3, embed_dim=10, n_labels=None,
-                      sequence_pooling='timestep', filter_empty_samples=False):
+                      sequence_pooling='timestep'):
     """
     Compute PID using batch/neural network method for multiple time series sequence/label pairs.
     Parameters:
     -----------
     X1_list, X2_list: List[numpy.ndarray]
         Lists of time series, one per sequence
-    Y_list: List[numpy.ndarray]
+    Y_list: List[int]
         Classification labels for each sequence
     X1_masks, X2_masks: List[numpy.ndarray]
         Lists of binary masks indicating valid timesteps for each sequence
@@ -59,9 +72,6 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
     sequence_pooling : str
         How to process sequences: 'timestep' (default, each timestep as sample), 
         'mean' (mean pooling over masked timesteps only)
-    filter_empty_samples : bool
-        For timestep mode: whether to filter using masks (default: False, keep all timesteps)
-        For mean mode: not applicable (always uses masks)
         
     Returns:
     --------
@@ -73,10 +83,7 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
         raise ValueError(f"X1_masks length ({len(X1_masks)}) must match X1_list length ({len(X1_list)})")
     if len(X2_masks) != len(X2_list):
         raise ValueError(f"X2_masks length ({len(X2_masks)}) must match X2_list length ({len(X2_list)})")
-    
-    if filter_empty_samples and sequence_pooling != 'timestep':
-        raise ValueError("filter_empty_samples=True is only allowed when sequence_pooling='timestep'")
-    
+
     # Set device
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -106,9 +113,6 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
     all_X2_data = []
     all_Y_labels = []
     
-    # Track filtering statistics for timestep mode
-    total_timesteps = 0
-    filtered_timesteps = 0
 
     for i, (X1, X2, Y) in enumerate(zip(X1_list, X2_list, Y_list)):
         X1 = np.asarray(X1)
@@ -127,6 +131,7 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
         if len(X1_past) == 0:
             continue
 
+
         # Get masks for this sequence
         X1_mask = X1_masks[i]
         X2_mask = X2_masks[i]
@@ -141,26 +146,9 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
 
         if sequence_pooling == 'timestep':
             # Treat each time step as independent data point
-            if filter_empty_samples:
-                # Filter using masks - only keep timesteps where both X1 and X2 have valid data
-                valid_mask = X1_mask_past & X2_mask_past
-                
-                total_timesteps += len(X1_past)
-                n_valid = np.sum(valid_mask)
-                filtered_timesteps += n_valid
-                
-                if n_valid > 0:
-                    X1_filtered = X1_past[valid_mask]
-                    X2_filtered = X2_past[valid_mask]
-                    all_X1_data.extend(X1_filtered)
-                    all_X2_data.extend(X2_filtered)
-                    all_Y_labels.extend([Y] * len(X1_filtered))
-                # If no valid timesteps, skip this sequence entirely
-            else:
-                # Keep all timesteps regardless of mask
-                all_X1_data.extend(X1_past)
-                all_X2_data.extend(X2_past)
-                all_Y_labels.extend([Y] * len(X1_past))
+            all_X1_data.extend(X1_past)
+            all_X2_data.extend(X2_past)
+            all_Y_labels.extend([Y] * len(X1_past))
         elif sequence_pooling == 'mean':
             # Mean pooling approach: only average over masked (valid) timesteps
             X1_valid_mask = X1_mask_past
@@ -175,22 +163,9 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
             # If no valid timesteps in either modality, skip this sequence
         else:
             raise ValueError(f"Unknown sequence_pooling method: {sequence_pooling}. Choose from 'timestep', 'mean'")
-    
     all_X1_data = np.array(all_X1_data)
     all_X2_data = np.array(all_X2_data)
     all_Y_labels = np.array(all_Y_labels)
-
-    # Print filtering statistics for timestep mode
-    if sequence_pooling == 'timestep' and filter_empty_samples:
-        n_removed = total_timesteps - filtered_timesteps
-        if total_timesteps > 0:
-            print(f"Mask filtering: Kept {filtered_timesteps}/{total_timesteps} timesteps ({filtered_timesteps/total_timesteps*100:.1f}%), removed {n_removed} invalid timesteps")
-        else:
-            print("Mask filtering: No timesteps to process")
-
-    # Check if we have any data after processing
-    if len(all_X1_data) == 0:
-        raise ValueError("No valid data found after processing! Consider adjusting filter_empty_samples or check your input data.")
 
     X1_tensor = torch.tensor(all_X1_data, dtype=torch.float32, device=device)
     X2_tensor = torch.tensor(all_X2_data, dtype=torch.float32, device=device)
@@ -201,7 +176,7 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
     Y_tensor = Y_tensor.view(-1)
     
     print(f"Using sequence pooling method: {sequence_pooling}")
-    print(f"Final tensor shapes: X1={X1_tensor.shape}, X2={X2_tensor.shape}, Y={Y_tensor.shape}")
+
 
     # Create train/test split
     n_samples = len(Y_tensor)
@@ -308,7 +283,7 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
         'method': 'batch'
     }
 
-def align_multimodal_irg_ts(reg_ts: np.ndarray, multimodal_irg_times_feats: Dict[str, List[Tuple[float, np.ndarray]]], modality_dim_dict: Dict[str, int], interval_length=1):
+def align_multimodal_irg_ts(reg_ts: np.ndarray, multimodal_irg_times_feats: Dict[str, List[Tuple[float, np.ndarray]]], modality_dim_dict: Dict[str, int], interval_length=1, linear_interpolation=False):
     """
     Align the regular time series (labs + vitals) with multimodal irrregular time series features (notes + cxr).
     Args:
@@ -317,10 +292,12 @@ def align_multimodal_irg_ts(reg_ts: np.ndarray, multimodal_irg_times_feats: Dict
             The key is the modality name, the value is a list of tuples, each containing the timestamp and the feature vector.
         modality_dim_dict: A dictionary of modality names and their dimensions.
         interval_length: The length of the intervals between the regular time series time steps for us to plug in the multimodal features.
+        linear_interpolation: If True, fill missing timesteps (where mask=0) with linear interpolation and set mask to all ones.
     Returns:
         A dictionary of aligned time series and masks. The key is the modality name, the value is a tuple of:
         - aligned time series of shape: (T, number of features in the modality)
-        - binary mask of shape: (T,) indicating which timesteps have actual irregular data (1) vs zero-filled (0)
+        - binary mask of shape: (T,) indicating which timesteps have actual irregular data (1) vs zero-filled (0).
+          If linear_interpolation=True, mask will be all ones after interpolation.
     """
     num_time_steps = len(reg_ts)
     multimodal_reg_ts = {}
@@ -358,17 +335,42 @@ def align_multimodal_irg_ts(reg_ts: np.ndarray, multimodal_irg_times_feats: Dict
             #     print(f"Averaging {len(feat_list)} measurements at index {index} for modality {modality}")
             aligned_ts[index, :] = np.mean(feat_list, axis=0)
             mask[index] = True  # Mark this timestep as having actual data
+        
+        # Apply linear interpolation if requested (equivalent to pandas interpolate method='linear', limit_direction='both')
+        if linear_interpolation:
+            # Only interpolate if we have at least 1 data point
+            valid_indices = np.where(mask)[0]
+            if len(valid_indices) >= 1:
+                # For each feature dimension, interpolate missing values
+                for feat_idx in range(num_features):
+                    # Perform linear interpolation equivalent to pandas interpolate(method='linear', limit_direction='both')
+                    # np.interp handles both multi-point interpolation and single-point constant fill
+                    valid_times = valid_indices.astype(float)
+                    valid_values = aligned_ts[valid_indices, feat_idx]
+                    
+                    # Interpolate for all timesteps (including extrapolation at both ends)
+                    all_times = np.arange(num_time_steps, dtype=float)
+                    interpolated_values = np.interp(all_times, valid_times, valid_values)
+                    
+                    # Update the aligned time series
+                    aligned_ts[:, feat_idx] = interpolated_values
+                
+                # Set mask to all ones since all timesteps now have interpolated data
+                mask = np.ones(num_time_steps, dtype=bool)
+            # If no valid data points, keep original aligned_ts (all zeros) and mask (all False)
             
         multimodal_reg_ts[modality] = (aligned_ts, mask)
         
     return multimodal_reg_ts
 
-def preprocess_mimiciv_data(stays: List[Dict], num_subsample_stays: int = None) -> List[Dict]:
+def preprocess_mimiciv_data(stays: List[Dict], modality_dim_dict: Dict[str, int], num_subsample_stays: int = None, linear_interpolation: bool = False) -> List[Dict]:
     """
     Preprocess the MIMIC-IV data.
     Args:
         stays: List of stays.
+        modality_dim_dict: Dictionary of modality names and their dimensions.
         num_subsample_stays: Number of stays to randomly sample for analysis. If None, use all eligible stays.
+        linear_interpolation: If True, apply linear interpolation to fill missing timesteps in multimodal irregular time series.
     Returns:
         all_multimodal_reg_ts: List of multimodal regular time series.
         all_labels: List of labels.
@@ -394,9 +396,6 @@ def preprocess_mimiciv_data(stays: List[Dict], num_subsample_stays: int = None) 
 
     # Process all selected stays
 
-    modality_dim_dict = {'labs_vitals': 30,
-                         'cxr': 1024,
-                         'notes': 768}
     all_multimodal_reg_ts = []
     all_labels = []
     
@@ -407,7 +406,7 @@ def preprocess_mimiciv_data(stays: List[Dict], num_subsample_stays: int = None) 
             'cxr': [(stay['cxr_time'][j], stay['cxr_feats'][j]) for j in range(len(stay['cxr_time']))]
         }
         
-        multimodal_reg_ts = align_multimodal_irg_ts(stay['reg_ts'], multimodal_irg_ts, modality_dim_dict)
+        multimodal_reg_ts = align_multimodal_irg_ts(stay['reg_ts'], multimodal_irg_ts, modality_dim_dict, linear_interpolation=linear_interpolation)
         # Add labs_vitals with a full mask (all timesteps are valid for regular time series)
         multimodal_reg_ts['labs_vitals'] = (stay['reg_ts'], np.ones(len(stay['reg_ts']), dtype=bool))
         
@@ -429,10 +428,13 @@ def main(args):
 
     train_stays = pickle.load(open(args.train_dataset_path, 'rb'))
     
-    all_multimodal_reg_ts, all_labels = preprocess_mimiciv_data(train_stays, args.num_subsample_stays)    
+    modality_dim_dict = {'labs_vitals': 30,
+                         'cxr': 1024,
+                         'notes': 768}
+    all_multimodal_reg_ts, all_labels = preprocess_mimiciv_data(train_stays, modality_dim_dict, args.num_subsample_stays, args.linear_interpolation)    
     
     # Get modality names from first stay (assuming all stays have same modalities)
-    modality_names = list(all_multimodal_reg_ts[0].keys())
+    modality_names = list(modality_dim_dict.keys())
     modality_pairs = list(itertools.combinations(modality_names, 2))
     print(f"\nGenerated {len(modality_pairs)} pairs of modalities for analysis: {modality_pairs}")
     
@@ -449,7 +451,6 @@ def main(args):
         X2_list = [stay_data[mod2][0] for stay_data in all_multimodal_reg_ts]  # Extract time series
         Y_list = all_labels
         
-        # Also extract masks for potential future use
         X1_masks = [stay_data[mod1][1] for stay_data in all_multimodal_reg_ts]  # Extract masks
         X2_masks = [stay_data[mod2][1] for stay_data in all_multimodal_reg_ts]  # Extract masks
         
@@ -473,8 +474,7 @@ def main(args):
             lr=args.lr, # use 1e-2 because the default lr is too low and the loss decreases too slowly
             embed_dim=args.embed_dim,
             n_labels=len(np.unique(Y_list)),
-            sequence_pooling=args.sequence_pooling,
-            filter_empty_samples=args.filter_empty
+            sequence_pooling=args.sequence_pooling
         )
         print(f"PID Results for {mod1} vs {mod2}: {pid_results}")
 
@@ -542,15 +542,15 @@ def main(args):
             })
 
     if dominant_pid_results:
-        output_filename = f'mimiciv_rus_multimodal_dominant_thresh{args.dominance_threshold:.1f}.npy'
-        output_path = os.path.join(args.output_dir, output_filename)
+        output_filename = f'rus_multimodal_dominant_thresh{args.dominance_threshold:.1f}_{args.sequence_pooling}pool.npy'
+        output_path = os.path.join(args.output_dir, args.task, output_filename)
         print(f"Saving {len(dominant_pid_results)} dominant multimodal PID results to {output_path}...")
         np.save(output_path, dominant_pid_results, allow_pickle=True)
         print("Saving dominant modality pairs complete.")
     
     if all_pid_results:
-        all_output_filename = f'mimiciv_rus_multimodal_all.npy'
-        all_output_path = os.path.join(args.output_dir, all_output_filename)
+        all_output_filename = f'rus_multimodal_all_{args.sequence_pooling}pool.npy'
+        all_output_path = os.path.join(args.output_dir, args.task, all_output_filename)
         print(f"Saving {len(all_pid_results)} PID results for all modality pairs to {all_output_path}...")
         np.save(all_output_path, all_pid_results, allow_pickle=True)
         print("Saving all modality pairs complete.")
@@ -579,6 +579,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='MIMIC-IV RUS computation')
     parser.add_argument('--output_dir', type=str, default='../results/mimiciv',
                         help='Directory to save analysis results')
+    parser.add_argument('--task', type=str, choices=['ihm', 'los'], required=True, help='Task to analyze, either in-hospital mortality (ihm) or length of stay (los)')
     parser.add_argument('--train_dataset_path', type=str, required=True,
                         help='Path to the preprocessed MIMIC-IV train dataset')
     parser.add_argument('--num_subsample_stays', type=int, default=None,
@@ -595,7 +596,7 @@ if __name__ == "__main__":
                         choices=['auto', 'joint', 'cvxpy', 'batch'],
                         help='PID estimation method (auto: choose based on dimensionality)')
     # General parameters
-    parser.add_argument('--batch_size', type=int, default=512,
+    parser.add_argument('--batch_size', type=int, default=256,
                         help='Batch size for batch method')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility')
@@ -625,14 +626,13 @@ if __name__ == "__main__":
     parser.add_argument('--sequence_pooling', type=str, default='timestep',
                         choices=['timestep', 'mean'],
                         help='How to process sequences for batch method (timestep, mean)')
-    
-    # Data filtering parameters
-    parser.add_argument('--filter_empty', action='store_true',
-                        help='For timestep mode: filter timesteps using masks (default: keep all timesteps)')
+    parser.add_argument('--linear_interpolation', action='store_true',
+                        help='Apply linear interpolation to fill missing timesteps in irregular time series')
     
     # CVXPY method specific parameters
     parser.add_argument('--regularization', type=float, default=1e-6,
                         help='Regularization parameter for CVXPY method')
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, args.task), exist_ok=True)
     main(args)

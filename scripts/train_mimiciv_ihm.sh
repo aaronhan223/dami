@@ -1,5 +1,7 @@
 #! /bin/bash
 
+# Best found: lambda_rus = 1.0, lambda_load = 0.02
+
 # Check if correct number of arguments provided
 if [ $# -ne 3 ]; then
     echo "Usage: $0 <lambda_rus> <lambda_load> <gpu>"
@@ -7,7 +9,7 @@ if [ $# -ne 3 ]; then
     echo "  lambda_load: Value for lambda_load (e.g., 0.02, 0.05)"
     echo "  gpu: GPU device ID (e.g., 0, 1, 2)"
     echo ""
-    echo "Example: $0 0.5 0.02 1"
+    echo "Example: $0 1.0 0.02 1"
     exit 1
 fi
 
@@ -35,7 +37,7 @@ if [[ ! "$GPU" =~ ^[0-9]+$ ]]; then
 fi
 
 # Create run name with hyperparameters
-RUN_NAME="mimiciv_manual_lambdarus${LAMBDA_RUS}_lambdaload${LAMBDA_LOAD}_gpu${GPU}"
+RUN_NAME="mimiciv_ihm_lambdarus${LAMBDA_RUS}_lambdaload${LAMBDA_LOAD}"
 
 echo "Starting training with:"
 echo "  lambda_u = lambda_r = lambda_s = $LAMBDA_RUS"
@@ -47,7 +49,8 @@ echo ""
 python ../src/train_mimiciv_multimodal.py \
     --train_data_path ../../mimic-iv-preprocess/data/ihm/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl \
     --val_data_path ../../mimic-iv-preprocess/data/ihm/val_ihm-48-cxr-notes-missingInd-standardized_stays.pkl \
-    --rus_data_path ../results/mimiciv/mimiciv_rus_multimodal_all.npy \
+    --rus_data_path ../results/mimiciv/ihm/rus_multimodal_all_meanpool.npy \
+    --task ihm \
     --truncate_from_end \
     --gpu $GPU \
     --use_wandb \
@@ -57,6 +60,6 @@ python ../src/train_mimiciv_multimodal.py \
     --lambda_r $LAMBDA_RUS \
     --lambda_s $LAMBDA_RUS \
     --lambda_load $LAMBDA_LOAD \
-    --wandb_run_name $RUN_NAME \
+    --run_name $RUN_NAME \
     --lr 1e-3 \
     --epochs 20
