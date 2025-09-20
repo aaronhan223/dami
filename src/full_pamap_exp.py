@@ -47,7 +47,7 @@ try:
     )
     from trus_moe_multimodal import MultimodalTRUSMoEModel
     from trus_moe_model import calculate_rus_losses, calculate_load_balancing_loss
-    from plot_expert_activation import analyze_expert_activations
+    from plots.plot_expert_activation import analyze_expert_activations
 except ImportError as e:
     print(f"Error importing required modules: {e}")
     print("Please ensure all required modules are available.")
@@ -58,24 +58,85 @@ DEFAULT_DATASET_DIR = "/cis/home/xhan56/pamap/PAMAP2_Dataset/Protocol"
 DEFAULT_OUTPUT_DIR = "../results/pamap_full_exp"
 
 
+def load_all_subjects_data(dataset_dir, subject_list):
+    """Load and combine data from multiple subjects"""
+    print(f"Loading data for subjects: {subject_list}")
+
+    all_data = []
+    for subject_id in subject_list:
+        try:
+            df = load_pamap_data(subject_id, dataset_dir)
+            df_processed, sensor_columns = preprocess_pamap_data(df)
+
+            if not df_processed.empty:
+                # Add subject_id column to track which subject data comes from
+                df_processed['subject_id'] = subject_id
+                all_data.append(df_processed)
+                print(f"Subject {subject_id}: {df_processed.shape[0]} samples")
+            else:
+                print(f"Warning: No data for subject {subject_id} after preprocessing")
+        except Exception as e:
+            print(f"Error loading subject {subject_id}: {e}")
+            continue
+
+    if not all_data:
+        raise ValueError("No valid data loaded from any subject")
+
+    # Combine all subjects
+    combined_df = pd.concat(all_data, ignore_index=True)
+    print(f"Combined data shape: {combined_df.shape}")
+
+    # Get sensor columns from the first processed dataframe
+    sensor_columns = [col for col in combined_df.columns if col not in ['activity_id', 'subject_id']]
+
+    return combined_df, sensor_columns
+
+
+def create_subject_based_splits(combined_df, train_subjects, val_subjects, test_subjects):
+    """Create train/val/test splits based on subject IDs"""
+    train_data = combined_df[combined_df['subject_id'].isin(train_subjects)].copy()
+    val_data = combined_df[combined_df['subject_id'].isin(val_subjects)].copy()
+    test_data = combined_df[combined_df['subject_id'].isin(test_subjects)].copy()
+
+    # Keep subject_id column for proper lagged data preparation
+    # It will be used in prepare_lagged_data_per_subject and then handled in dataset creation
+    train_data = train_data.reset_index(drop=True)
+    val_data = val_data.reset_index(drop=True)
+    test_data = test_data.reset_index(drop=True)
+
+    print(f"Subject-based splits: Train={len(train_data)}, Val={len(val_data)}, Test={len(test_data)}")
+
+    return train_data, val_data, test_data
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Full PAMAP2 Experiment: RUS Computation + TRUS MoE Training')
-    
+
     # Data args
     parser.add_argument('--dataset_dir', type=str, default=DEFAULT_DATASET_DIR,
                         help='Directory containing PAMAP2 dataset files')
     parser.add_argument('--output_dir', type=str, default=DEFAULT_OUTPUT_DIR,
                         help='Directory to save analysis results')
     parser.add_argument('--subject_id', type=int, default=1,
-                        help='Subject ID to analyze (1-9)')
+                        help='Subject ID to analyze (1-9) - DEPRECATED: now uses all subjects')
+    parser.add_argument('--use_all_subjects', action='store_true', default=True,
+                        help='Use all subjects with predefined train/val/test splits')
     
-    # Data splitting args
+    # Data splitting args (DEPRECATED when use_all_subjects=True)
     parser.add_argument('--train_split', type=float, default=0.6,
-                        help='Training data split fraction')
+                        help='Training data split fraction (unused when use_all_subjects=True)')
     parser.add_argument('--val_split', type=float, default=0.2,
-                        help='Validation data split fraction')
+                        help='Validation data split fraction (unused when use_all_subjects=True)')
     parser.add_argument('--test_split', type=float, default=0.2,
-                        help='Test data split fraction')
+                        help='Test data split fraction (unused when use_all_subjects=True)')
+
+    # Subject-based splits (when use_all_subjects=True)
+    parser.add_argument('--train_subjects', type=str, default='1,2,3,4,5,6',
+                        help='Comma-separated list of training subject IDs')
+    parser.add_argument('--val_subjects', type=str, default='7',
+                        help='Comma-separated list of validation subject IDs')
+    parser.add_argument('--test_subjects', type=str, default='8,9',
+                        help='Comma-separated list of test subject IDs')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility')
     
@@ -254,19 +315,251 @@ class MultimodalDataSplitter:
         return split_df, indices
 
 
-def compute_temporal_rus_for_split(split_data, modality_sensors, args, split_name, device):
-    """Compute temporal RUS for a specific data split using BATCH estimator"""
-    print(f"\n=== Computing temporal RUS for {split_name} split ===")
-    
+def prepare_lagged_data_per_subject(split_data, modality_sensors, max_lag):
+    """Prepare lagged data by processing each subject individually to prevent cross-subject time mixing"""
+    # Get all unique subject IDs from the split data (if subject_id column exists)
+    if 'subject_id' in split_data.columns:
+        split_subject_ids = split_data['subject_id'].unique()
+    else:
+        # If no subject_id column, treat as single subject
+        split_subject_ids = [None]
+
+    # Generate pairs of modalities
+    modality_names = list(modality_sensors.keys())
+    modality_pairs = list(itertools.combinations(modality_names, 2))
+
+    # Prepare combined data for each modality pair
+    combined_data = {}
+
+    for mod1, mod2 in modality_pairs:
+        combined_X1 = []
+        combined_X2 = []
+        combined_Y = []
+
+        for subject_id in split_subject_ids:
+            if subject_id is not None:
+                subject_data = split_data[split_data['subject_id'] == subject_id]
+            else:
+                subject_data = split_data
+
+            if len(subject_data) <= max_lag:
+                print(f"Warning: Subject {subject_id} has insufficient data ({len(subject_data)} <= {max_lag})")
+                continue
+
+            # Prepare modality data for this subject
+            subject_mod1_sensors = [s for s in modality_sensors[mod1] if s in subject_data.columns]
+            subject_mod2_sensors = [s for s in modality_sensors[mod2] if s in subject_data.columns]
+
+            if not subject_mod1_sensors or not subject_mod2_sensors:
+                print(f"Warning: Missing sensors for subject {subject_id}")
+                continue
+
+            X1_subject = subject_data[subject_mod1_sensors].values
+            X2_subject = subject_data[subject_mod2_sensors].values
+            Y_subject = subject_data['activity_label'].values
+
+            # Add subject data to combined arrays
+            combined_X1.append(X1_subject)
+            combined_X2.append(X2_subject)
+            combined_Y.append(Y_subject)
+
+        # Store combined data for this modality pair
+        if combined_X1:
+            combined_data[(mod1, mod2)] = {
+                'X1': combined_X1,
+                'X2': combined_X2,
+                'Y': combined_Y
+            }
+
+    return combined_data
+
+
+def compute_temporal_rus_for_split_multi_subject(split_data, modality_sensors, args, split_name, device, subject_ids):
+    """Compute temporal RUS for a specific data split with proper per-subject lagged data preparation"""
+    print(f"\n=== Computing temporal RUS for {split_name} split (subjects: {subject_ids}) ===")
+
     # Determine unique activities and create mapping
     unique_activities = sorted([act for act in split_data['activity_id'].unique() if act != 0])
     activity_map = {activity_id: i for i, activity_id in enumerate(unique_activities)}
-    
+
     # Remap activity IDs
     split_data['activity_label'] = split_data['activity_id'].map(activity_map)
     split_data.dropna(subset=['activity_label'], inplace=True)
     split_data['activity_label'] = split_data['activity_label'].astype(int)
-    
+
+    # Prepare combined data for multi-subject analysis
+    combined_data = prepare_lagged_data_per_subject(split_data, modality_sensors, args.max_lag)
+
+    if not combined_data:
+        print(f"Warning: No valid data for {split_name} split")
+        return None, activity_map
+
+    all_pid_results = []
+
+    for i, ((mod1, mod2), data) in enumerate(combined_data.items()):
+        print(f"\n--- Analyzing Modality Pair {i+1}/{len(combined_data)}: {mod1} vs {mod2} ---")
+
+        X1_list = data['X1']
+        X2_list = data['X2']
+        Y_list = data['Y']
+
+        try:
+            # Create a custom multi_lag_analysis that handles per-subject lagging
+            pid_results = multi_lag_analysis_multi_subject(
+                X1_list, X2_list, Y_list,
+                max_lag=args.max_lag, bins=args.bins,
+                method='batch',
+                batch_size=min(args.batch_size_rus, sum(len(y) for y in Y_list)//2),
+                n_batches=args.n_batches,
+                seed=args.seed,
+                device=device,
+                hidden_dim=args.hidden_dim,
+                layers=args.layers,
+                activation=args.activation,
+                lr=args.lr_rus,
+                embed_dim=args.embed_dim,
+                discrim_epochs=args.discrim_epochs,
+                ce_epochs=args.ce_epochs
+            )
+        except Exception as e:
+            print(f"Error during PID analysis for pair ({mod1}, {mod2}): {e}")
+            continue
+
+        # Process results
+        lags = pid_results.get('lag', range(args.max_lag + 1))
+        lag_results = []
+
+        for lag_idx, lag in enumerate(lags):
+            try:
+                r = pid_results['redundancy'][lag_idx]
+                u1 = pid_results['unique_x1'][lag_idx]
+                u2 = pid_results['unique_x2'][lag_idx]
+                s = pid_results['synergy'][lag_idx]
+                mi = pid_results['total_di'][lag_idx]
+
+                if mi > 1e-9:
+                    lag_results.append({
+                        'lag': lag,
+                        'R_value': r,
+                        'U1_value': u1,
+                        'U2_value': u2,
+                        'S_value': s,
+                        'MI_value': mi,
+                        'R_norm': r / mi,
+                        'U1_norm': u1 / mi,
+                        'U2_norm': u2 / mi,
+                        'S_norm': s / mi
+                    })
+            except (IndexError, KeyError) as e:
+                print(f"Warning: Error processing lag {lag} for pair ({mod1}, {mod2}): {e}")
+                continue
+
+        if lag_results:
+            # Calculate average metrics across all lags
+            avg_metrics = {
+                'R_value': np.mean([r['R_value'] for r in lag_results]),
+                'U1_value': np.mean([r['U1_value'] for r in lag_results]),
+                'U2_value': np.mean([r['U2_value'] for r in lag_results]),
+                'S_value': np.mean([r['S_value'] for r in lag_results]),
+                'MI_value': np.mean([r['MI_value'] for r in lag_results]),
+                'R_norm': np.mean([r['R_norm'] for r in lag_results]),
+                'U1_norm': np.mean([r['U1_norm'] for r in lag_results]),
+                'U2_norm': np.mean([r['U2_norm'] for r in lag_results]),
+                'S_norm': np.mean([r['S_norm'] for r in lag_results])
+            }
+
+            all_pid_results.append({
+                'feature_pair': (mod1, mod2),
+                'avg_metrics': avg_metrics,
+                'lag_results': lag_results,
+                'modality1_features': modality_sensors[mod1],
+                'modality2_features': modality_sensors[mod2],
+                'n_features_mod1': len(modality_sensors[mod1]),
+                'n_features_mod2': len(modality_sensors[mod2])
+            })
+
+    print(f"\nAnalysis complete for {split_name} split: {len(all_pid_results)} modality pairs processed.")
+
+    return all_pid_results, activity_map
+
+
+def multi_lag_analysis_multi_subject(X1_list, X2_list, Y_list, max_lag, bins, **kwargs):
+    """
+    Modified multi_lag_analysis that handles multiple subjects by creating
+    lagged datasets for each subject individually, then concatenating
+    """
+    results = {
+        'lag': [],
+        'redundancy': [],
+        'unique_x1': [],
+        'unique_x2': [],
+        'synergy': [],
+        'total_di': []
+    }
+
+    for lag in range(max_lag + 1):
+        # Prepare lagged data for each subject
+        combined_X1_lag = []
+        combined_X2_lag = []
+        combined_Y_lag = []
+
+        for X1_subj, X2_subj, Y_subj in zip(X1_list, X2_list, Y_list):
+            if lag > 0:
+                if len(Y_subj) <= lag:
+                    continue
+                X1_lagged = X1_subj[:-lag]
+                X2_lagged = X2_subj[:-lag]
+                Y_lagged = Y_subj[lag:]
+            else:
+                X1_lagged = X1_subj
+                X2_lagged = X2_subj
+                Y_lagged = Y_subj
+
+            if len(Y_lagged) > 0:
+                combined_X1_lag.append(X1_lagged)
+                combined_X2_lag.append(X2_lagged)
+                combined_Y_lag.append(Y_lagged)
+
+        if not combined_X1_lag:
+            continue
+
+        # Concatenate lagged data from all subjects
+        X1_lag = np.vstack(combined_X1_lag)
+        X2_lag = np.vstack(combined_X2_lag)
+        Y_lag = np.concatenate(combined_Y_lag)
+
+        # Call single lag analysis
+        try:
+            lag_result = multi_lag_analysis(X1_lag, X2_lag, Y_lag, max_lag=0, bins=bins, **kwargs)
+
+            # Extract results for lag 0 (which is our actual lag)
+            results['lag'].append(lag)
+            results['redundancy'].append(lag_result['redundancy'][0])
+            results['unique_x1'].append(lag_result['unique_x1'][0])
+            results['unique_x2'].append(lag_result['unique_x2'][0])
+            results['synergy'].append(lag_result['synergy'][0])
+            results['total_di'].append(lag_result['total_di'][0])
+
+        except Exception as e:
+            print(f"Error computing PID for lag {lag}: {e}")
+            continue
+
+    return results
+
+
+def compute_temporal_rus_for_split(split_data, modality_sensors, args, split_name, device):
+    """Compute temporal RUS for a specific data split using BATCH estimator (legacy single-subject version)"""
+    print(f"\n=== Computing temporal RUS for {split_name} split ===")
+
+    # Determine unique activities and create mapping
+    unique_activities = sorted([act for act in split_data['activity_id'].unique() if act != 0])
+    activity_map = {activity_id: i for i, activity_id in enumerate(unique_activities)}
+
+    # Remap activity IDs
+    split_data['activity_label'] = split_data['activity_id'].map(activity_map)
+    split_data.dropna(subset=['activity_label'], inplace=True)
+    split_data['activity_label'] = split_data['activity_label'].astype(int)
+
     Y = split_data['activity_label'].values
     
     if len(Y) <= args.max_lag:
@@ -394,7 +687,10 @@ def compute_temporal_rus_for_split(split_data, modality_sensors, args, split_nam
 def save_rus_results(rus_results, args, split_name):
     """Save RUS results for a specific split"""
     if rus_results:
-        output_filename = f'pamap_subject{args.subject_id}_{split_name}_multimodal_all_lag{args.max_lag}_bins{args.bins}.npy'
+        if args.use_all_subjects:
+            output_filename = f'pamap_all_subjects_{split_name}_multimodal_all_lag{args.max_lag}_bins{args.bins}.npy'
+        else:
+            output_filename = f'pamap_subject{args.subject_id}_{split_name}_multimodal_all_lag{args.max_lag}_bins{args.bins}.npy'
         output_path = os.path.join(args.output_dir, output_filename)
         print(f"Saving {len(rus_results)} RUS results for {split_name} split to {output_path}...")
         np.save(output_path, rus_results, allow_pickle=True)
@@ -437,38 +733,57 @@ class MultimodalPamapDatasetWithSplit(MultimodalPamapDataset):
             self._create_windows()
     
     def _create_windows(self):
-        """Creates sliding windows with separate features for each modality."""
+        """Creates sliding windows with separate features for each modality, handling multiple subjects properly."""
         self.windows = []
         self.labels = []
-        
-        # Get data for each modality
+
+        # Check if we have multiple subjects
+        if 'subject_id' in self.split_data.columns:
+            # Process each subject separately to avoid cross-subject temporal dependencies
+            subject_ids = self.split_data['subject_id'].unique()
+            print(f"Processing {len(subject_ids)} subjects for window creation")
+
+            for subject_id in subject_ids:
+                subject_data = self.split_data[self.split_data['subject_id'] == subject_id]
+                self._create_windows_for_subject(subject_data, subject_id)
+        else:
+            # Single subject or already processed data
+            self._create_windows_for_subject(self.split_data, None)
+
+        print(f"Created {len(self.windows)} multimodal windows for split data.")
+
+    def _create_windows_for_subject(self, subject_data, subject_id):
+        """Create windows for a single subject's data"""
+        if len(subject_data) < self.seq_len:
+            print(f"Warning: Subject {subject_id} has insufficient data ({len(subject_data)} < {self.seq_len})")
+            return
+
+        # Get data for each modality for this subject
         modality_data = {}
         for mod_name, sensors in self.modality_sensors.items():
-            existing_sensors = [s for s in sensors if s in self.split_data.columns]
+            existing_sensors = [s for s in sensors if s in subject_data.columns]
             if existing_sensors:
-                modality_data[mod_name] = self.split_data[existing_sensors].values
+                modality_data[mod_name] = subject_data[existing_sensors].values
             else:
-                print(f"Warning: No sensors found for modality {mod_name}")
-                modality_data[mod_name] = np.zeros((len(self.split_data), 1))
-        
-        label_values = self.split_data['activity_label'].values
-        total_samples = len(self.split_data)
-        
+                print(f"Warning: No sensors found for modality {mod_name} in subject {subject_id}")
+                modality_data[mod_name] = np.zeros((len(subject_data), 1))
+
+        label_values = subject_data['activity_label'].values
+        total_samples = len(subject_data)
+
         for i in range(0, total_samples - self.seq_len + 1, self.step):
             window_data_by_modality = []
-            
+
             for mod_name in self.modality_names:
                 mod_window = modality_data[mod_name][i : i + self.seq_len]
                 window_data_by_modality.append(torch.tensor(mod_window, dtype=torch.float32))
-            
+
             window_labels = label_values[i : i + self.seq_len]
             unique_labels, counts = np.unique(window_labels, return_counts=True)
             most_frequent_label = unique_labels[np.argmax(counts)]
-            
+
             self.windows.append(window_data_by_modality)
             self.labels.append(torch.tensor(most_frequent_label, dtype=torch.long))
-        
-        print(f"Created {len(self.windows)} multimodal windows for split data.")
 
 
 def main():
@@ -495,7 +810,10 @@ def main():
     # Initialize wandb if enabled
     if args.use_wandb:
         wandb_config = {k: v for k, v in vars(args).items()}
-        run_name = f"full_exp_subj{args.subject_id}_seq{args.seq_len}"
+        if args.use_all_subjects:
+            run_name = f"full_exp_all_subjects_seq{args.seq_len}"
+        else:
+            run_name = f"full_exp_subj{args.subject_id}_seq{args.seq_len}"
         if args.wandb_run_name:
             run_name = args.wandb_run_name
         
@@ -508,74 +826,160 @@ def main():
         )
     
     print("=== FULL PAMAP2 EXPERIMENT: Temporal RUS + TRUS MoE ===")
-    print(f"Subject ID: {args.subject_id}")
-    print(f"Data splits: Train={args.train_split}, Val={args.val_split}, Test={args.test_split}")
-    
-    # Load and preprocess data
-    print("\n=== STEP 1: Loading and preprocessing data ===")
-    try:
-        df = load_pamap_data(args.subject_id, args.dataset_dir)
-        df_processed, sensor_columns = preprocess_pamap_data(df)
-        
-        if df_processed.empty:
-            print("No data remaining after preprocessing. Exiting.")
+
+    if args.use_all_subjects:
+        # Parse subject lists
+        train_subjects = [int(s.strip()) for s in args.train_subjects.split(',')]
+        val_subjects = [int(s.strip()) for s in args.val_subjects.split(',')]
+        test_subjects = [int(s.strip()) for s in args.test_subjects.split(',')]
+        all_subjects = train_subjects + val_subjects + test_subjects
+
+        print(f"Using all subjects approach:")
+        print(f"  Train subjects: {train_subjects}")
+        print(f"  Val subjects: {val_subjects}")
+        print(f"  Test subjects: {test_subjects}")
+
+        # Load and preprocess data for all subjects
+        print("\n=== STEP 1: Loading and preprocessing data for all subjects ===")
+        try:
+            combined_df, sensor_columns = load_all_subjects_data(args.dataset_dir, all_subjects)
+
+            if combined_df.empty:
+                print("No data remaining after preprocessing. Exiting.")
+                sys.exit(1)
+
+            print(f"Combined preprocessed data shape: {combined_df.shape}")
+
+        except Exception as e:
+            print(f"Error loading/preprocessing data: {e}")
             sys.exit(1)
-        
-        print(f"Preprocessed data shape: {df_processed.shape}")
-        
-    except Exception as e:
-        print(f"Error loading/preprocessing data: {e}")
-        sys.exit(1)
-    
-    # Create data splitter
-    splitter = MultimodalDataSplitter(df_processed, sensor_columns, args)
+
+        # Create subject-based splits
+        train_split_data, val_split_data, test_split_data = create_subject_based_splits(
+            combined_df, train_subjects, val_subjects, test_subjects
+        )
+
+        # Create a mock splitter for modality_sensors
+        from pamap_rus_multimodal import categorize_pamap_sensors
+        modality_sensors = categorize_pamap_sensors(sensor_columns)
+
+    else:
+        print(f"Using single subject approach: Subject ID {args.subject_id}")
+        print(f"Data splits: Train={args.train_split}, Val={args.val_split}, Test={args.test_split}")
+
+        # Load and preprocess data
+        print("\n=== STEP 1: Loading and preprocessing data ===")
+        try:
+            df = load_pamap_data(args.subject_id, args.dataset_dir)
+            df_processed, sensor_columns = preprocess_pamap_data(df)
+
+            if df_processed.empty:
+                print("No data remaining after preprocessing. Exiting.")
+                sys.exit(1)
+
+            print(f"Preprocessed data shape: {df_processed.shape}")
+
+        except Exception as e:
+            print(f"Error loading/preprocessing data: {e}")
+            sys.exit(1)
+
+        # Create data splitter
+        splitter = MultimodalDataSplitter(df_processed, sensor_columns, args)
+        modality_sensors = splitter.modality_sensors
     
     print("\n=== STEP 2: Computing temporal RUS for each split ===")
-    
+
     # Compute RUS for each split
     splits = ['train', 'val', 'test']
     rus_results_all = {}
     activity_maps_all = {}
-    
-    for split_name in splits:
-        split_data, split_indices = splitter.get_split_data(split_name)
-        
-        rus_results, activity_map = compute_temporal_rus_for_split(
-            split_data, splitter.modality_sensors, args, split_name, device
-        )
-        
-        if rus_results is not None:
-            rus_results_all[split_name] = rus_results
-            activity_maps_all[split_name] = activity_map
-            
-            # Save RUS results
-            save_rus_results(rus_results, args, split_name)
-        else:
-            print(f"Failed to compute RUS for {split_name} split")
-            sys.exit(1)
+
+    if args.use_all_subjects:
+        # Use multi-subject approach
+        split_data_dict = {
+            'train': train_split_data,
+            'val': val_split_data,
+            'test': test_split_data
+        }
+        subject_ids_dict = {
+            'train': train_subjects,
+            'val': val_subjects,
+            'test': test_subjects
+        }
+
+        for split_name in splits:
+            split_data = split_data_dict[split_name]
+            subject_ids = subject_ids_dict[split_name]
+
+            rus_results, activity_map = compute_temporal_rus_for_split_multi_subject(
+                split_data, modality_sensors, args, split_name, device, subject_ids
+            )
+
+            if rus_results is not None:
+                rus_results_all[split_name] = rus_results
+                activity_maps_all[split_name] = activity_map
+
+                # Save RUS results
+                save_rus_results(rus_results, args, split_name)
+            else:
+                print(f"Failed to compute RUS for {split_name} split")
+                sys.exit(1)
+
+    else:
+        # Use single subject approach
+        for split_name in splits:
+            split_data, split_indices = splitter.get_split_data(split_name)
+
+            rus_results, activity_map = compute_temporal_rus_for_split(
+                split_data, splitter.modality_sensors, args, split_name, device
+            )
+
+            if rus_results is not None:
+                rus_results_all[split_name] = rus_results
+                activity_maps_all[split_name] = activity_map
+
+                # Save RUS results
+                save_rus_results(rus_results, args, split_name)
+            else:
+                print(f"Failed to compute RUS for {split_name} split")
+                sys.exit(1)
     
     print("\n=== STEP 3: Setting up TRUS MoE training ===")
-    
+
     # Load RUS data for model training
+    if args.use_all_subjects:
+        train_rus_filename = f'pamap_all_subjects_train_multimodal_all_lag{args.max_lag}_bins{args.bins}.npy'
+        val_rus_filename = f'pamap_all_subjects_val_multimodal_all_lag{args.max_lag}_bins{args.bins}.npy'
+        test_rus_filename = f'pamap_all_subjects_test_multimodal_all_lag{args.max_lag}_bins{args.bins}.npy'
+    else:
+        train_rus_filename = f'pamap_subject{args.subject_id}_train_multimodal_all_lag{args.max_lag}_bins{args.bins}.npy'
+        val_rus_filename = f'pamap_subject{args.subject_id}_val_multimodal_all_lag{args.max_lag}_bins{args.bins}.npy'
+        test_rus_filename = f'pamap_subject{args.subject_id}_test_multimodal_all_lag{args.max_lag}_bins{args.bins}.npy'
+
     train_rus_data = load_multimodal_rus_data(
-        os.path.join(args.output_dir, f'pamap_subject{args.subject_id}_train_multimodal_all_lag{args.max_lag}_bins{args.bins}.npy'),
-        splitter.modality_sensors, args.seq_len
+        os.path.join(args.output_dir, train_rus_filename),
+        modality_sensors, args.seq_len
     )
-    
+
     val_rus_data = load_multimodal_rus_data(
-        os.path.join(args.output_dir, f'pamap_subject{args.subject_id}_val_multimodal_all_lag{args.max_lag}_bins{args.bins}.npy'),
-        splitter.modality_sensors, args.seq_len
+        os.path.join(args.output_dir, val_rus_filename),
+        modality_sensors, args.seq_len
     )
-    
+
     test_rus_data = load_multimodal_rus_data(
-        os.path.join(args.output_dir, f'pamap_subject{args.subject_id}_test_multimodal_all_lag{args.max_lag}_bins{args.bins}.npy'),
-        splitter.modality_sensors, args.seq_len
+        os.path.join(args.output_dir, test_rus_filename),
+        modality_sensors, args.seq_len
     )
-    
-    # Create datasets for each split
-    train_split_data, _ = splitter.get_split_data('train')
-    val_split_data, _ = splitter.get_split_data('val')
-    test_split_data, _ = splitter.get_split_data('test')
+
+    # Get split data
+    if args.use_all_subjects:
+        # Data already prepared
+        pass
+    else:
+        # Create datasets for each split
+        train_split_data, _ = splitter.get_split_data('train')
+        val_split_data, _ = splitter.get_split_data('val')
+        test_split_data, _ = splitter.get_split_data('test')
     
     # Use train activity map for consistency
     activity_map = activity_maps_all['train']
@@ -588,17 +992,17 @@ def main():
         split_data['activity_label'] = split_data['activity_label'].astype(int)
     
     train_dataset = MultimodalPamapDatasetWithSplit(
-        train_split_data, train_rus_data, splitter.modality_sensors,
+        train_split_data, train_rus_data, modality_sensors,
         args.seq_len, args.window_step, activity_map
     )
-    
+
     val_dataset = MultimodalPamapDatasetWithSplit(
-        val_split_data, val_rus_data, splitter.modality_sensors,
+        val_split_data, val_rus_data, modality_sensors,
         args.seq_len, args.window_step, activity_map
     )
-    
+
     test_dataset = MultimodalPamapDatasetWithSplit(
-        test_split_data, test_rus_data, splitter.modality_sensors,
+        test_split_data, test_rus_data, modality_sensors,
         args.seq_len, args.window_step, activity_map
     )
     
@@ -637,11 +1041,11 @@ def main():
     ) if len(test_dataset) > 0 else []
     
     # Model configuration
-    modality_names = list(splitter.modality_sensors.keys())
+    modality_names = list(modality_sensors.keys())
     modality_configs = []
-    
+
     for mod_name in modality_names:
-        num_sensors = len(splitter.modality_sensors[mod_name])
+        num_sensors = len(modality_sensors[mod_name])
         config = {
             'input_dim': num_sensors,
             'num_layers': args.modality_encoder_layers,
@@ -721,7 +1125,10 @@ def main():
                 best_val_accuracy = val_acc
                 best_epoch = epoch
                 
-                save_path = os.path.join(args.output_dir, f'best_full_exp_model_subj{args.subject_id}.pth')
+                if args.use_all_subjects:
+                    save_path = os.path.join(args.output_dir, f'best_full_exp_model_all_subjects.pth')
+                else:
+                    save_path = os.path.join(args.output_dir, f'best_full_exp_model_subj{args.subject_id}.pth')
                 
                 torch.save({
                     'epoch': epoch,
@@ -746,7 +1153,10 @@ def main():
     
     if len(test_loader) > 0 and best_epoch != -1:
         # Load best model for testing
-        best_model_path = os.path.join(args.output_dir, f'best_full_exp_model_subj{args.subject_id}.pth')
+        if args.use_all_subjects:
+            best_model_path = os.path.join(args.output_dir, f'best_full_exp_model_all_subjects.pth')
+        else:
+            best_model_path = os.path.join(args.output_dir, f'best_full_exp_model_subj{args.subject_id}.pth')
         if os.path.exists(best_model_path):
             checkpoint = torch.load(best_model_path, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])

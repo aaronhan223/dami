@@ -22,7 +22,7 @@ try:
     from trus_moe_multimodal import MultimodalTRUSMoEModel
     from trus_moe_model import calculate_rus_losses, calculate_load_balancing_loss
     from pamap_rus import get_pamap_column_names, load_pamap_data, preprocess_pamap_data
-    from plot_expert_activation import analyze_expert_activations
+    from plots.plot_expert_activation import analyze_expert_activations
 except ImportError as e:
     print(f"Error importing project files: {e}")
     print("Please ensure trus_moe_multimodal.py, trus_moe_model.py, pamap_rus.py, and plot_expert_activation.py are accessible.")

@@ -368,13 +368,13 @@ def temporal_pid_batch(X1, X2, Y, lag=1, batch_size=256, n_batches=10,
     # Handle multiclass targets
     num_labels = len(np.unique(Y_present))
 
-    # Create train/test split
+    # Create train/test split - use temporal split to preserve time structure
     n_samples = len(Y_present)
     n_train = int(0.8 * n_samples)
-    
-    indices = np.random.permutation(n_samples)
-    train_idx = indices[:n_train]
-    test_idx = indices[n_train:]
+
+    # Use temporal split instead of random permutation to preserve temporal structure
+    train_idx = np.arange(n_train)
+    test_idx = np.arange(n_train, n_samples)
     
     # Create datasets
     train_ds = MultimodalDataset(
