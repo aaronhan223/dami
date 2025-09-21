@@ -2,6 +2,7 @@ import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
 import argparse
 from typing import Dict
+import pickle
 import numpy as np
 import torch
 import torch.nn as nn
@@ -11,17 +12,18 @@ from tqdm import tqdm
 
 # Import required modules
 from trus_moe_multimodal import MultimodalTRUSMoEModel
-from train_mosi_multimodal import load_mosimosei_rus_data
-from multibench_affect_get_data import get_dataloader
+from train_wesad_multimodal import (
+    MultimodalWESADDataset, 
+    collate_multimodal, 
+    load_wesad_rus_data
+)
+from wesad_rus_multimodal import load_wesad_data
 from utils.checkpoint_utils import load_checkpoint, create_model_from_checkpoint
 from utils.evaluation_utils import print_evaluation_results, save_evaluation_plots
 
 
-
-
 def evaluate_model(model: MultimodalTRUSMoEModel, 
                   dataloader: DataLoader, 
-                  rus_data: Dict,
                   device: torch.device,
                   dataset_name: str = "Test") -> Dict:
     """
@@ -41,19 +43,11 @@ def evaluate_model(model: MultimodalTRUSMoEModel,
     progress_bar = tqdm(dataloader, desc=f"Evaluating {dataset_name}")
     
     with torch.no_grad():
-        for batch_idx, (vision, audio, text, labels) in enumerate(progress_bar):
-            batch_size = vision.shape[0]
-            
-            # Prepare modality data
-            modality_data = [vision.to(device), audio.to(device), text.to(device)]
-            
-            # Prepare RUS values for this batch
-            rus_values = {
-                'U': torch.stack([rus_data['U'] for _ in range(batch_size)]).to(device),
-                'R': torch.stack([rus_data['R'] for _ in range(batch_size)]).to(device),
-                'S': torch.stack([rus_data['S'] for _ in range(batch_size)]).to(device)
-            }
-            labels = labels.squeeze(-1).to(device)
+        for batch_idx, (modality_data, rus_values_batch, labels) in enumerate(progress_bar):
+            # Move data to device
+            modality_data = [mod.to(device) for mod in modality_data]
+            rus_values = {k: v.to(device) for k, v in rus_values_batch.items()}
+            labels = labels.to(device)
 
             # Forward pass
             final_logits, _ = model(modality_data, rus_values)
@@ -90,15 +84,14 @@ def evaluate_model(model: MultimodalTRUSMoEModel,
     recall = recall_score(all_labels, all_predictions, average='weighted')
     f1 = f1_score(all_labels, all_predictions, average='weighted')
     
-    # AU-ROC (for binary classification, use positive class probability)
-    if all_probabilities.shape[1] == 2:
-        auc_score = roc_auc_score(all_labels, all_probabilities[:, 1])
-    else:
-        # For multiclass, use one-vs-rest
-        try:
+    # AU-ROC (for multiclass, use one-vs-rest)
+    try:
+        if all_probabilities.shape[1] > 2:
             auc_score = roc_auc_score(all_labels, all_probabilities, multi_class='ovr', average='weighted')
-        except ValueError:
-            auc_score = 0.0  # In case of issues with multiclass AUC
+        else:
+            auc_score = roc_auc_score(all_labels, all_probabilities[:, 1])
+    except ValueError:
+        auc_score = 0.0  # In case of issues with multiclass AUC
     
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     
@@ -129,25 +122,21 @@ def evaluate_model(model: MultimodalTRUSMoEModel,
     return results
 
 
-
-
 def main():
-    parser = argparse.ArgumentParser(description='Test Multimodal TRUS-MoE Model on MOSI/MOSEI Data')
+    parser = argparse.ArgumentParser(description='Test Multimodal TRUS-MoE Model on WESAD Data')
     
     # Required arguments
     parser.add_argument('--checkpoint_path', type=str, required=True,
                        help='Path to the model checkpoint')
-    parser.add_argument('--dataset_path', type=str, required=True,
-                       help='Path to the dataset')
+    parser.add_argument('--processed_dataset_dir', type=str, required=True,
+                       help='Directory containing processed WESAD dataset')
     parser.add_argument('--rus_data_path', type=str, required=True,
                        help='Path to the RUS data')
-    parser.add_argument('--dataset', type=str, required=True, choices=['mosi', 'mosei'],
-                       help='Dataset to test on (mosi or mosei)')
     
     # Optional arguments
-    parser.add_argument('--output_dir', type=str, default='../results/affect/',
+    parser.add_argument('--output_dir', type=str, default='../results/wesad/',
                        help='Directory to save test results')
-    parser.add_argument('--batch_size', type=int, default=32,
+    parser.add_argument('--batch_size', type=int, default=64,
                        help='Batch size for testing')
     parser.add_argument('--num_workers', type=int, default=0,
                        help='Number of workers for DataLoader')
@@ -175,49 +164,64 @@ def main():
         print("Using CPU")
     
     # Create output directory
-    args.output_dir = os.path.join(args.output_dir, args.dataset)
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Load checkpoint
     model_state_dict, train_args, modality_configs, modality_names, best_val_acc = load_checkpoint(
         args.checkpoint_path, device)
     
+    # Load data split information
+    data_split = pickle.load(open(os.path.join(args.processed_dataset_dir, 'wesad_split.pkl'), 'rb'))
+    train_subjects = data_split['train']
+    val_subjects = data_split['val']
+    test_subjects = data_split['test']
+    
     # Load RUS data
     print(f"Loading RUS data from {args.rus_data_path}...")
-    rus_data = load_mosimosei_rus_data(args.rus_data_path, modality_names, train_args.seq_len)
+    rus_data = load_wesad_rus_data(args.rus_data_path, modality_names, train_args.seq_len)
     
-    # Load test data
-    print(f"Loading test data from {args.dataset_path}...")
-    train_loader, val_loader, test_loader = get_dataloader(
-        args.dataset_path, 
-        data_type=args.dataset, 
-        max_pad=True, 
-        task='classification', 
-        max_seq_len=train_args.seq_len, 
-        batch_size=args.batch_size
-    )
+    # WESAD class information
+    class_idx_to_name = {
+        0: 'Transient',
+        1: 'Baseline', 
+        2: 'Stress',
+        3: 'Amusement',
+        4: 'Meditation',
+        5: 'Unknown'
+    }
+    num_classes = len(class_idx_to_name)
+    class_names = list(class_idx_to_name.values())
     
-    # Get data info from a sample batch
-    sample_batch = next(iter(test_loader))
-    vision_sample, audio_sample, text_sample, labels_sample = sample_batch
-    num_classes = 2
-    
-    print(f"Test data info:")
-    print(f"  Vision shape: {vision_sample.shape}")
-    print(f"  Audio shape: {audio_sample.shape}")
-    print(f"  Text shape: {text_sample.shape}")
-    print(f"  Labels shape: {labels_sample.shape}")
+    print(f"WESAD dataset info:")
+    print(f"  Train subjects: {train_subjects}")
+    print(f"  Val subjects: {val_subjects}")
+    print(f"  Test subjects: {test_subjects}")
     print(f"  Number of classes: {num_classes}")
+    print(f"  Class names: {class_names}")
+    print(f"  Modalities: {modality_names}")
     
-
     # Create model
     model = create_model_from_checkpoint(model_state_dict, train_args, modality_configs, num_classes, device)
     
-    # Define class names for MOSI/MOSEI (binary sentiment classification)
-    class_names = ['Negative', 'Positive']
+    # Create test dataset and dataloader
+    test_dataset = MultimodalWESADDataset(
+        test_subjects, args.processed_dataset_dir, rus_data, 
+        modality_names, train_args.seq_len, train_args.window_step
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True if device.type == "cuda" else False,
+        collate_fn=collate_multimodal
+    )
+    
+    print(f"Test dataset size: {len(test_dataset)}")
     
     # Evaluate on test set
-    test_results = evaluate_model(model, test_loader, rus_data, device, "Test")
+    test_results = evaluate_model(model, test_loader, device, "Test")
     print_evaluation_results(test_results, "Test", class_names)
     
     # Save test plots
@@ -236,7 +240,21 @@ def main():
     # Optional: Evaluate on training set
     if args.eval_train:
         print(f"\nEvaluating on training set...")
-        train_results = evaluate_model(model, train_loader, rus_data, device, "Train")
+        train_dataset = MultimodalWESADDataset(
+            train_subjects, args.processed_dataset_dir, rus_data,
+            modality_names, train_args.seq_len, train_args.window_step
+        )
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=True if device.type == "cuda" else False,
+            collate_fn=collate_multimodal
+        )
+        
+        train_results = evaluate_model(model, train_loader, device, "Train")
         print_evaluation_results(train_results, "Train", class_names)
         
         if args.save_plots:
@@ -245,7 +263,21 @@ def main():
     # Optional: Evaluate on validation set
     if args.eval_val:
         print(f"\nEvaluating on validation set...")
-        val_results = evaluate_model(model, val_loader, rus_data, device, "Validation")
+        val_dataset = MultimodalWESADDataset(
+            val_subjects, args.processed_dataset_dir, rus_data,
+            modality_names, train_args.seq_len, train_args.window_step
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=True if device.type == "cuda" else False,
+            collate_fn=collate_multimodal
+        )
+        
+        val_results = evaluate_model(model, val_loader, device, "Validation")
         print_evaluation_results(val_results, "Validation", class_names)
         
         if args.save_plots:
@@ -259,6 +291,7 @@ def main():
     print(f"Best training validation accuracy: {best_val_acc:.4f}")
     print(f"Test AU-ROC: {test_results['auc_score']:.4f}")
     print(f"Test Accuracy: {test_results['accuracy']:.4f} ({test_results['accuracy']*100:.2f}%)")
+    print(f"Results saved to: {args.output_dir}")
     print(f"{'='*60}")
 
 

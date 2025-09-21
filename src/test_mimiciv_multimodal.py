@@ -1,15 +1,13 @@
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
 import argparse
-from typing import Dict, List, Tuple
+from typing import Dict
 import pickle
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
-import matplotlib.pyplot as plt
-import seaborn as sns
 from tqdm import tqdm
 
 # Import required modules
@@ -20,7 +18,6 @@ from train_mimiciv_multimodal import (
     collate_multimodal, 
     load_mimiciv_rus_data
 )
-from utils.rus_utils import extend_rus_with_sequence_length
 from utils.checkpoint_utils import load_checkpoint, create_model_from_checkpoint
 from utils.evaluation_utils import print_evaluation_results, save_evaluation_plots
 
@@ -56,8 +53,6 @@ def evaluate_model(model: MultimodalTRUSMoEModel,
             labels = labels.to(device)
 
             # Forward pass
-            seq_len = modality_data[0].shape[1]
-            rus_values = extend_rus_with_sequence_length(rus_values, seq_len)
             final_logits, _ = model(modality_data, rus_values)
 
             # Calculate loss
@@ -193,7 +188,7 @@ def main():
     
     # Load RUS data
     print(f"Loading RUS data from {args.rus_data_path}...")
-    rus_data = load_mimiciv_rus_data(args.rus_data_path, modality_names)
+    rus_data = load_mimiciv_rus_data(args.rus_data_path, modality_names, train_args.seq_len)
     
     # Get data info
     num_classes = len(np.unique(test_labels))

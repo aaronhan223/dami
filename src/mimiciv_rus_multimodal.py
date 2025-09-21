@@ -2,18 +2,18 @@
 This script computes the RUS of the time series of a stay in MIMIC-IV
 Example usage for in-hospital mortality:
 1. Linear interpolation + timestep pooling (no pooling)
-python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl --task ihm --linear_interpolation
+python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl --task ihm --linear_interpolation --seq_len 48 --num_lags 6
 
 2. Mean pooling
-python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl --task ihm --sequence_pooling mean
+python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl --task ihm --sequence_pooling mean --seq_len 48 --num_lags 6
 
 Example usage for length of stay:
-python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_los-48-cxr-notes-missingInd-standardized_stays.pkl --task los --linear_interpolation
-python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_los-48-cxr-notes-missingInd-standardized_stays.pkl --task los --sequence_pooling mean
+python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_los-48-cxr-notes-missingInd-standardized_stays.pkl --task los --linear_interpolation --seq_len 48 --num_lags 6
+python mimiciv_rus_multimodal.py --train_dataset_path /path/to/train_los-48-cxr-notes-missingInd-standardized_stays.pkl --task los --sequence_pooling mean --seq_len 48 --num_lags 6
 """
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
 import argparse
 import pickle
 import numpy as np
@@ -28,6 +28,115 @@ from estimators.ce_alignment_information import (
     CEAlignmentInformation, Discrim, MultimodalDataset,
     train_discrim, eval_discrim, train_ce_alignment, eval_ce_alignment
 )
+
+def temporal_pid_label_multi_sequence_multi_lag(X1_list, X2_list, Y_list, X1_masks, X2_masks, seq_len=None, num_lags=3, batch_size=256, n_batches=10, 
+                      discrim_epochs=20, ce_epochs=10, seed=42, device=None,
+                      hidden_dim=32, layers=2, activation='relu', lr=1e-3, embed_dim=10, n_labels=None,
+                      sequence_pooling='timestep'):
+    """
+    Compute PID using batch/neural network method for multiple time series sequence/label pairs across multiple lags.
+    Parameters:
+    -----------
+    X1_list, X2_list: List[numpy.ndarray]
+        Lists of time series, one per sequence
+    Y_list: List[int]
+        Classification labels for each sequence
+    X1_masks, X2_masks: List[numpy.ndarray]
+        Lists of binary masks indicating valid timesteps for each sequence
+    seq_len: int
+        Length of the sequences. If None, inferred from the data
+    num_lags: int
+        Number of lags to compute, evenly distributed across the sequence
+    batch_size: int
+        Batch size for training
+    n_batches : int
+        Number of batches to average over
+    discrim_epochs : int
+        Epochs for discriminator training
+    ce_epochs : int
+        Epochs for alignment training
+    seed : int
+        Random seed
+    device : torch.device
+        Device to run computations on
+    hidden_dim : int
+        Hidden dimension for neural networks
+    layers : int
+        Number of layers for neural networks
+    activation : str
+        Activation function for neural networks
+    lr : float
+        Learning rate for neural networks
+    embed_dim : int
+        Embedding dimension for alignment model
+    n_labels : int
+        Number of class labels. If None, inferred from Y_list
+    sequence_pooling : str
+        How to process sequences: 'timestep' (default, each timestep as sample), 
+        'mean' (mean pooling over masked timesteps only)
+        
+    Returns:
+    --------
+    results : dict
+        PID components for each lag
+    """
+    # Generate lags based on seq_len and num_lags
+    if seq_len is None:
+        # Infer seq_len from the data (use minimum length across all sequences)
+        seq_len = min(len(x) for x in X1_list)
+        print(f"Inferred seq_len from data: {seq_len}")
+    
+    # Validate that seq_len % num_lags == 0
+    if seq_len % num_lags != 0:
+        raise ValueError(f"seq_len ({seq_len}) must be divisible by num_lags ({num_lags})")
+    
+    # Generate evenly spaced lags
+    if num_lags == 1:
+        lags = [0]
+    else:
+        lags = [i * seq_len // num_lags for i in range(num_lags)]
+    
+    print(f"Computing lags: {lags} (seq_len={seq_len}, num_lags={num_lags})")
+    
+    results = {
+        'lag': [],
+        'redundancy': [],
+        'unique_x1': [],
+        'unique_x2': [],
+        'synergy': [],
+        'total_di': [],
+        'method': []
+    }
+    
+    for lag in tqdm(lags, desc="Processing lags"):
+        try:
+            pid_result = temporal_pid_label_multi_sequence_batch(
+                X1_list, X2_list, Y_list, X1_masks, X2_masks,
+                lag=lag, batch_size=batch_size, n_batches=n_batches,
+                discrim_epochs=discrim_epochs, ce_epochs=ce_epochs,
+                seed=seed, device=device, hidden_dim=hidden_dim,
+                layers=layers, activation=activation, lr=lr,
+                embed_dim=embed_dim, n_labels=n_labels,
+                sequence_pooling=sequence_pooling
+            )
+            
+            results['lag'].append(lag)
+            results['redundancy'].append(pid_result['redundancy'])
+            results['unique_x1'].append(pid_result['unique_x1'])
+            results['unique_x2'].append(pid_result['unique_x2'])
+            results['synergy'].append(pid_result['synergy'])
+            results['total_di'].append(pid_result['total_di'])
+            results['method'].append(pid_result.get('method', 'batch'))
+            
+        except Exception as e:
+            print(f"Error at lag {lag}: {str(e)}")
+            # Append NaN values for failed lags
+            results['lag'].append(lag)
+            for key in ['redundancy', 'unique_x1', 'unique_x2', 'synergy', 'total_di']:
+                results[key].append(np.nan)
+            results['method'].append('failed')
+    
+    return results
 
 def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, X2_masks, lag=1, batch_size=256, n_batches=10, 
                       discrim_epochs=20, ce_epochs=10, seed=42, device=None,
@@ -129,8 +238,7 @@ def temporal_pid_label_multi_sequence_batch(X1_list, X2_list, Y_list, X1_masks, 
             X2_past = X2[:-lag, :]
         
         if len(X1_past) == 0:
-            continue
-
+            continue        
 
         # Get masks for this sequence
         X1_mask = X1_masks[i]
@@ -459,9 +567,11 @@ def main(args):
         print(f"X2 ({mod2}) shapes: {[x.shape for x in X2_list[:3]]}{'...' if len(X2_list) > 3 else ''}")
         print(f"Labels: {Y_list[:10]}{'...' if len(Y_list) > 10 else ''}")
         
-        pid_results = temporal_pid_label_multi_sequence_batch(
+        # Use multi-lag analysis
+        pid_results = temporal_pid_label_multi_sequence_multi_lag(
             X1_list, X2_list, Y_list, X1_masks, X2_masks,
-            lag=0, # always set lag to 0 because y is a static target
+            seq_len=args.seq_len,
+            num_lags=args.num_lags,
             batch_size=args.batch_size,
             n_batches=args.n_batches,
             discrim_epochs=args.discrim_epochs,
@@ -471,89 +581,134 @@ def main(args):
             hidden_dim=args.hidden_dim,
             layers=args.layers,
             activation=args.activation,
-            lr=args.lr, # use 1e-2 because the default lr is too low and the loss decreases too slowly
+            lr=args.lr,
             embed_dim=args.embed_dim,
             n_labels=len(np.unique(Y_list)),
             sequence_pooling=args.sequence_pooling
         )
-        print(f"PID Results for {mod1} vs {mod2}: {pid_results}")
+        print(f"PID Results for {mod1} vs {mod2}: {len(pid_results['lag'])} lags analyzed")
 
-        r = pid_results['redundancy']
-        u1 = pid_results['unique_x1']
-        u2 = pid_results['unique_x2']
-        s = pid_results['synergy']
-        mi = pid_results['total_di']
+        # --- Analyze dominance across all lags as a unit ---
+        lags = pid_results.get('lag', [])
+        dominant_counts = {'R': 0, 'U1': 0, 'U2': 0, 'S': 0}
+        total_valid_lags = 0
+        
+        lag_results = []  # Store results for all lags for this pair
+        
+        for lag_idx, lag in enumerate(lags):
+            try:
+                r = pid_results['redundancy'][lag_idx]
+                u1 = pid_results['unique_x1'][lag_idx]
+                u2 = pid_results['unique_x2'][lag_idx]
+                s = pid_results['synergy'][lag_idx]
+                mi = pid_results['total_di'][lag_idx]
 
-        if mi > 1e-9:
-            r_norm = r / mi
-            u1_norm = u1 / mi
-            u2_norm = u2 / mi
-            s_norm = s / mi
-
-
-            results = {
-                'R_value': r,
-                'U1_value': u1,
-                'U2_value': u2,
-                'S_value': s,
-                'MI_value': mi,
-                'R_norm': r_norm,
-                'U1_norm': u1_norm,
-                'U2_norm': u2_norm,
-                'S_norm': s_norm
+                if mi > 1e-9:  # Avoid division by zero or near-zero MI
+                    total_valid_lags += 1
+                    
+                    # Get normalized values for each term
+                    r_norm = r / mi
+                    u1_norm = u1 / mi
+                    u2_norm = u2 / mi
+                    s_norm = s / mi
+                    
+                    # Find the term with the highest value
+                    norm_values = {
+                        'R': r_norm,
+                        'U1': u1_norm,
+                        'U2': u2_norm,
+                        'S': s_norm
+                    }
+                    # Get key with maximum value
+                    max_term = None
+                    max_value = -1
+                    for term, value in norm_values.items():
+                        if value > max_value:
+                            max_value = value
+                            max_term = term
+                    
+                    # If highest and above threshold, count it
+                    if max_term and max_value > args.dominance_threshold:
+                        dominant_counts[max_term] += 1
+                    
+                    # Store this lag's result
+                    lag_results.append({
+                        'lag': lag,
+                        'R_value': r,
+                        'U1_value': u1,
+                        'U2_value': u2,
+                        'S_value': s,
+                        'MI_value': mi,
+                        'R_norm': r_norm,
+                        'U1_norm': u1_norm,
+                        'U2_norm': u2_norm,
+                        'S_norm': s_norm
+                    })
+            except IndexError:
+                print(f"Warning: Index out of bounds for lag {lag} (index {lag_idx}) for pair ({mod1}, {mod2}). Skipping lag.")
+                continue
+            except KeyError as e:
+                print(f"Warning: Missing key {e} in pid_results for pair ({mod1}, {mod2}). Skipping dominance check.")
+                break  # Stop checking lags for this pair if keys are missing
+        
+        # Check if we have enough valid lags to evaluate
+        if total_valid_lags > 0:
+            # Calculate average metrics across all lags
+            avg_metrics = {
+                'R_value': np.mean([r['R_value'] for r in lag_results]),
+                'U1_value': np.mean([r['U1_value'] for r in lag_results]),
+                'U2_value': np.mean([r['U2_value'] for r in lag_results]), 
+                'S_value': np.mean([r['S_value'] for r in lag_results]),
+                'MI_value': np.mean([r['MI_value'] for r in lag_results]),
+                'R_norm': np.mean([r['R_norm'] for r in lag_results]),
+                'U1_norm': np.mean([r['U1_norm'] for r in lag_results]),
+                'U2_norm': np.mean([r['U2_norm'] for r in lag_results]),
+                'S_norm': np.mean([r['S_norm'] for r in lag_results])
             }
-
-            norm_values = {
-                'R': r_norm,
-                'U1': u1_norm,
-                'U2': u2_norm,
-                'S': s_norm
-            }
-            max_term = None
-            max_value = -1
-            for term, value in norm_values.items():
-                if value > max_value:
-                    max_value = value
-                    max_term = term
-            if max_term and max_value > args.dominance_threshold:
-                print(f"Dominant term for {mod1} vs {mod2}: {max_term} with value {max_value}")
-                dominant_pid_results.append({
-                    'feature_pair': (mod1, mod2),
-                    'dominant_term': max_term,
-                    'dominance_ratio': 1, # always set to 1 because we only analyzed one lag
-                    'lags_analyzed': 1,
-                    'avg_metrics': results,
-                    'lag_results': [results],
-                    # 'modality1_features': modality_names[mod1],
-                    # 'modality2_features': modality_names[mod2],
-                    'n_features_mod1': X1_list[0].shape[1],
-                    'n_features_mod2': X2_list[0].shape[1]
-                })
-
-
+            
+            # Save results for all modality pairs
             all_pid_results.append({
                 'feature_pair': (mod1, mod2),
-                'avg_metrics': results,
-                'lag_results': [results],
-                # 'modality1_features': modality_names[mod1],
-                # 'modality2_features': modality_names[mod2],
+                'avg_metrics': avg_metrics,
+                'lag_results': lag_results,
                 'n_features_mod1': X1_list[0].shape[1],
                 'n_features_mod2': X2_list[0].shape[1]
             })
+            
+            # Find term that is dominant across at least percentage of the lags
+            for term, count in dominant_counts.items():
+                dominance_ratio = count / total_valid_lags
+                if dominance_ratio >= args.dominance_percentage:
+                    print(f"Found dominant term {term} for pair ({mod1}, {mod2}) across {dominance_ratio:.1%} of lags")
+                    
+                    # Store this pair's result as dominant
+                    dominant_pid_results.append({
+                        'feature_pair': (mod1, mod2),
+                        'dominant_term': term,
+                        'dominance_ratio': dominance_ratio,
+                        'lags_analyzed': total_valid_lags,
+                        'avg_metrics': avg_metrics,
+                        'lag_results': lag_results,
+                        'n_features_mod1': X1_list[0].shape[1],
+                        'n_features_mod2': X2_list[0].shape[1]
+                    })
+                    break  # We've found the dominant term, no need to check others
 
     if dominant_pid_results:
-        output_filename = f'rus_multimodal_dominant_thresh{args.dominance_threshold:.1f}_{args.sequence_pooling}pool.npy'
+        output_filename = f'rus_multimodal_dominant_seq{args.seq_len}_lags{args.num_lags}_thresh{args.dominance_threshold:.1f}_pct{int(args.dominance_percentage*100)}_{args.sequence_pooling}pool.npy'
         output_path = os.path.join(args.output_dir, args.task, output_filename)
         print(f"Saving {len(dominant_pid_results)} dominant multimodal PID results to {output_path}...")
         np.save(output_path, dominant_pid_results, allow_pickle=True)
         print("Saving dominant modality pairs complete.")
     
     if all_pid_results:
-        all_output_filename = f'rus_multimodal_all_{args.sequence_pooling}pool.npy'
+        all_output_filename = f'rus_multimodal_all_seq{args.seq_len}_lags{args.num_lags}_{args.sequence_pooling}pool.npy'
         all_output_path = os.path.join(args.output_dir, args.task, all_output_filename)
         print(f"Saving {len(all_pid_results)} PID results for all modality pairs to {all_output_path}...")
         np.save(all_output_path, all_pid_results, allow_pickle=True)
         print("Saving all modality pairs complete.")
+
+    print(f"\nAnalysis complete for all {len(modality_pairs)} modality pairs.")
 
     # --- Print summary of dominant terms ---
     if dominant_pid_results:
@@ -572,6 +727,12 @@ def main(args):
     else:
         print("No dominant PID terms found with the current threshold and percentage criteria.")
 
+    # --- Print modality information summary ---
+    print("\n--- Modality Information Summary ---")
+    for mod_name, dim in modality_dim_dict.items():
+        print(f"Modality '{mod_name}': {dim} features")
+    print("------------------------------------")
+
         
 
 
@@ -584,8 +745,10 @@ if __name__ == "__main__":
                         help='Path to the preprocessed MIMIC-IV train dataset')
     parser.add_argument('--num_subsample_stays', type=int, default=None,
                         help='Number of stays to randomly sample for analysis')
-    parser.add_argument('--max_lag', type=int, default=10,
-                        help='Maximum lag for temporal PID analysis')
+    parser.add_argument('--seq_len', type=int, default=None,
+                        help='Length of sequences for lag computation. If None, inferred from data')
+    parser.add_argument('--num_lags', type=int, default=3,
+                        help='Number of lags to compute, evenly distributed across the sequence')
     parser.add_argument('--bins', type=int, default=4,
                         help='Number of bins for discretization (reduced for multivariate)')
     parser.add_argument('--dominance_threshold', type=float, default=0.4,
