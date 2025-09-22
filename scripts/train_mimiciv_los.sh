@@ -1,4 +1,5 @@
 #! /bin/bash
+# Best found: lambda_rus = 1.0, lambda_load = 0.02
 
 # Check if correct number of arguments provided
 if [ $# -ne 3 ]; then
@@ -47,9 +48,10 @@ echo ""
 python ../src/train_mimiciv_multimodal.py \
     --train_data_path ../../mimic-iv-preprocess/data/los/train_los-cxr-notes-missingInd-standardized_stays.pkl \
     --val_data_path ../../mimic-iv-preprocess/data/los/val_los-cxr-notes-missingInd-standardized_stays.pkl \
-    --rus_data_path ../results/mimiciv/los/rus_multimodal_all_meanpool.npy \
+    --rus_data_path ../results/mimiciv/los/rus_multimodal_all_seq48_lags8_meanpool.npy \
     --task los \
     --truncate_from_end \
+    --seq_len 48 \
     --gpu $GPU \
     --use_wandb \
     --wandb_project mimiciv-multimodal-trus-moe \
@@ -58,6 +60,6 @@ python ../src/train_mimiciv_multimodal.py \
     --lambda_r $LAMBDA_RUS \
     --lambda_s $LAMBDA_RUS \
     --lambda_load $LAMBDA_LOAD \
-    --wandb_run_name $RUN_NAME \
+    --run_name $RUN_NAME \
     --lr 1e-3 \
     --epochs 20

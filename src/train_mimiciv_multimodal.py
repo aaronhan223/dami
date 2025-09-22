@@ -5,7 +5,7 @@ python train_mimiciv_multimodal.py --train_data_path /path/to/train_ihm-48-cxr-n
 python train_mimiciv_multimodal.py --train_data_path /path/to/train_los-cxr-notes-missingInd-standardized_stays.pkl --val_data_path /path/to/val_los-cxr-notes-missingInd-standardized_stays.pkl --rus_data_path /path/to/rus_multimodal_all_meanpool.npy --task los --use_wandb --gpu 0
 """
 import os
-# os.environ['CUDA_VISIBLE_DEVICES'] = '1,2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
 import argparse
 from typing import Dict, List, Tuple
 from datetime import datetime
@@ -26,9 +26,9 @@ from plot_expert_activation import analyze_expert_activations
 from utils.rus_utils import extend_rus_with_sequence_length
 
 
-def load_mimiciv_rus_data(rus_filepath: str, modality_names: List[str]) -> Dict[str, torch.Tensor]:
+def load_mimiciv_rus_data(rus_filepath: str, modality_names: List[str], seq_len: int) -> Dict[str, torch.Tensor]:
     """
-    Loads MIMIC-IV RUS data.
+    Loads MIMIC-IV RUS data with multiple lags and interpolates values across sequence length.
     """
     if not os.path.exists(rus_filepath):
         raise FileNotFoundError(f"RUS data file not found: {rus_filepath}")
@@ -37,16 +37,23 @@ def load_mimiciv_rus_data(rus_filepath: str, modality_names: List[str]) -> Dict[
     all_pid_results = np.load(rus_filepath, allow_pickle=True)
     num_modalities = len(modality_names)
     modality_to_idx = {name: idx for idx, name in enumerate(modality_names)}
-    U = torch.zeros(num_modalities, dtype=torch.float32)
-    R = torch.zeros(num_modalities, num_modalities, dtype=torch.float32)
-    S = torch.zeros(num_modalities, num_modalities, dtype=torch.float32)
+    
+    T = seq_len
+    # Initialize modality-level tensors with time dimension
+    U = torch.zeros(num_modalities, T, dtype=torch.float32)
+    R = torch.zeros(num_modalities, num_modalities, T, dtype=torch.float32)
+    S = torch.zeros(num_modalities, num_modalities, T, dtype=torch.float32)
     
     print(f"Expected modality names: {modality_names}")
     print(f"Total RUS results to process: {len(all_pid_results)}")
+    print(f"Sequence length for interpolation: {T}")
     
     pairs_loaded = 0
     pairs_skipped_not_found = 0
     pairs_skipped_same_modality = 0
+    
+    # We'll keep track of processed modality pairs to avoid duplicates
+    processed_pairs = set()
     
     for result in all_pid_results:
         mod1, mod2 = result['feature_pair']
@@ -63,26 +70,62 @@ def load_mimiciv_rus_data(rus_filepath: str, modality_names: List[str]) -> Dict[
             print(f"Warning: Skipping pair ({mod1}, {mod2}) because they are the same modality.")
             pairs_skipped_same_modality += 1
             continue
+            
+        # Create a key for the unordered pair
+        pair_key = (min(m1_idx, m2_idx), max(m1_idx, m2_idx))
+        if pair_key in processed_pairs:
+            continue
+        processed_pairs.add(pair_key)
         
         lag_results = result['lag_results']
-        assert len(lag_results) == 1, "Expected 1 lag result, lag = 0"
-        R_value = lag_results[0]['R_value']
-        S_value = lag_results[0]['S_value']
-        U1_value = lag_results[0]['U1_value']
-        U2_value = lag_results[0]['U2_value']
-
-        print(f"Loading pair ({mod1}, {mod2}): R={R_value:.6f}, S={S_value:.6f}, U1={U1_value:.6f}, U2={U2_value:.6f}")
+        num_lags = len(lag_results)
         
-        R[m1_idx, m2_idx] = torch.tensor(R_value)
-        R[m2_idx, m1_idx] = torch.tensor(R_value)
-        S[m1_idx, m2_idx] = torch.tensor(S_value)
-        S[m2_idx, m1_idx] = torch.tensor(S_value)
-
-        U[m1_idx] = torch.tensor(U1_value)
-        U[m2_idx] = torch.tensor(U2_value)
+        # Extract lag values and RUS values
+        lag_values = [lag_data['lag'] for lag_data in lag_results]
+        R_values = [lag_data['R_value'] for lag_data in lag_results]
+        S_values = [lag_data['S_value'] for lag_data in lag_results]
+        U1_values = [lag_data['U1_value'] for lag_data in lag_results]
+        U2_values = [lag_data['U2_value'] for lag_data in lag_results]
         
+        print(f"Loading pair ({mod1}, {mod2}): {num_lags} lags at positions {lag_values}")
+        
+        # Map lag values directly to time indices (ensure within [0, T-1] range)
+        lag_times = [min(lag, T - 1) for lag in lag_values]
+        
+        # Create full time range for interpolation
+        full_times = torch.arange(T, dtype=torch.float32)
+        
+        # Helper function for interpolation
+        def interpolate_values(values):
+            if len(lag_times) == 1:
+                return torch.full((T,), values[0])
+            else:
+                return torch.from_numpy(np.interp(full_times.numpy(), lag_times, values))
+        
+        # Interpolate R values
+        R_interp = interpolate_values(R_values)
+        R[m1_idx, m2_idx, :] = R_interp
+        R[m2_idx, m1_idx, :] = R_interp  # Symmetric
+        
+        # Interpolate S values
+        S_interp = interpolate_values(S_values)
+        S[m1_idx, m2_idx, :] = S_interp
+        S[m2_idx, m1_idx, :] = S_interp  # Symmetric
+        
+        # Interpolate U values for each modality (take max to handle overlapping pairs)
+        U1_interp = interpolate_values(U1_values)
+        U[m1_idx, :] = torch.maximum(U[m1_idx, :], U1_interp)
+        
+        U2_interp = interpolate_values(U2_values)
+        U[m2_idx, :] = torch.maximum(U[m2_idx, :], U2_interp)
         pairs_loaded += 1
     
+    print(f"Modality-level RUS data computed with interpolation. Shapes: U({U.shape}), R({R.shape}), S({S.shape})")
+    print(f"  Average R value: {R.mean().item():.4f}")
+    print(f"  Average S value: {S.mean().item():.4f}")
+    print(f"  Average U value: {U.mean().item():.4f}")
+    print(f"  Pairs loaded: {pairs_loaded}, Skipped (not found): {pairs_skipped_not_found}, Skipped (same): {pairs_skipped_same_modality}")
+
     return {'U': U, 'R': R, 'S': S}
         
 class MultimodalMIMICIVDataset(Dataset):
@@ -256,8 +299,6 @@ def train_epoch_multimodal_mimiciv(model: MultimodalTRUSMoEModel,
         optimizer.zero_grad()
 
         # Forward pass
-        seq_len = modality_data[0].shape[1]
-        rus_values = extend_rus_with_sequence_length(rus_values, seq_len)
         final_logits, all_aux_moe_outputs = model(modality_data, rus_values)
 
         # Calculate Task Loss
@@ -402,8 +443,6 @@ def eval_epoch_multimodal_mimiciv(model: MultimodalTRUSMoEModel, dataloader: Dat
             labels = labels.to(device)
 
             # Forward pass
-            seq_len = modality_data[0].shape[1]
-            rus_values = extend_rus_with_sequence_length(rus_values, seq_len)
             final_logits, _ = model(modality_data, rus_values)
 
             # Calculate Task Loss
@@ -506,7 +545,7 @@ def main(args):
     val_baseline_acc = 100.0 * max(np.bincount(val_labels)) / len(val_labels)
     print(f"\nBaseline Accuracy (Majority Class): Train={train_baseline_acc:.2f}%, Val={val_baseline_acc:.2f}%")
     
-    rus_data = load_mimiciv_rus_data(args.rus_data_path, modality_names)
+    rus_data = load_mimiciv_rus_data(args.rus_data_path, modality_names, args.seq_len)
     
 
     print(f"train multimodal reg ts: {train_multimodal_reg_ts[0].keys()}")
@@ -711,7 +750,6 @@ def main(args):
                 
                 plot_iter = iter(plot_loader)
                 batch_modalities, batch_masks, batch_rus, batch_labels = next(plot_iter)
-                batch_rus = extend_rus_with_sequence_length(batch_rus, batch_modalities[0].shape[1])
                 # Move to device (same as training/validation loops)
                 batch_modalities = [mod.to(device) for mod in batch_modalities]
                 batch_rus = {k: v.to(device) for k, v in batch_rus.items()}

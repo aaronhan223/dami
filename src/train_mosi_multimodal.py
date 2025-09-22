@@ -1,10 +1,9 @@
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
 import argparse
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from datetime import datetime
 import random
-import pickle
 import numpy as np
 from tqdm import tqdm
 import torch
@@ -15,11 +14,10 @@ from trus_moe_multimodal import MultimodalTRUSMoEModel
 from trus_moe_model import calculate_rus_losses, calculate_load_balancing_loss
 from plot_expert_activation import analyze_expert_activations
 from multibench_affect_get_data import get_dataloader
-from utils.rus_utils import extend_rus_with_sequence_length
 
-def load_mosimosei_rus_data(rus_filepath: str, modality_names: List[str]) -> Dict[str, torch.Tensor]:
+def load_mosimosei_rus_data(rus_filepath: str, modality_names: List[str], seq_len: int) -> Dict[str, torch.Tensor]:
     """
-    Loads MOSI/MOSEI RUS data.
+    Loads MOSI/MOSEI RUS data with multi-lag support and interpolation.
     """
     if not os.path.exists(rus_filepath):
         raise FileNotFoundError(f"RUS data file not found: {rus_filepath}")
@@ -28,11 +26,15 @@ def load_mosimosei_rus_data(rus_filepath: str, modality_names: List[str]) -> Dic
     all_pid_results = np.load(rus_filepath, allow_pickle=True)
     num_modalities = len(modality_names)
     modality_to_idx = {name: idx for idx, name in enumerate(modality_names)}
-    U = torch.zeros(num_modalities, dtype=torch.float32)
-    R = torch.zeros(num_modalities, num_modalities, dtype=torch.float32)
-    S = torch.zeros(num_modalities, num_modalities, dtype=torch.float32)
+    
+    # Initialize RUS tensors with time dimension
+    T = seq_len
+    U = torch.zeros(num_modalities, T, dtype=torch.float32)
+    R = torch.zeros(num_modalities, num_modalities, T, dtype=torch.float32)
+    S = torch.zeros(num_modalities, num_modalities, T, dtype=torch.float32)
     
     print(f"Expected modality names: {modality_names}")
+    print(f"Sequence length: {seq_len}")
     print(f"Total RUS results to process: {len(all_pid_results)}")
     
     pairs_loaded = 0
@@ -56,24 +58,53 @@ def load_mosimosei_rus_data(rus_filepath: str, modality_names: List[str]) -> Dic
             continue
         
         lag_results = result['lag_results']
-        assert len(lag_results) == 1, "Expected 1 lag result, lag = 0"
-        R_value = lag_results[0]['R_value']
-        S_value = lag_results[0]['S_value']
-        U1_value = lag_results[0]['U1_value']
-        U2_value = lag_results[0]['U2_value']
-
-        print(f"Loading pair ({mod1}, {mod2}): R={R_value:.6f}, S={S_value:.6f}, U1={U1_value:.6f}, U2={U2_value:.6f}")
+        num_lags = len(lag_results)
         
-        R[m1_idx, m2_idx] = torch.tensor(R_value)
-        R[m2_idx, m1_idx] = torch.tensor(R_value)
-        S[m1_idx, m2_idx] = torch.tensor(S_value)
-        S[m2_idx, m1_idx] = torch.tensor(S_value)
-
-        U[m1_idx] = torch.tensor(U1_value)
-        U[m2_idx] = torch.tensor(U2_value)
+        # Extract lag values and RUS values
+        lag_values = [lag_result['lag'] for lag_result in lag_results]
+        R_values = [lag_result['R_value'] for lag_result in lag_results]
+        S_values = [lag_result['S_value'] for lag_result in lag_results]
+        U1_values = [lag_result['U1_value'] for lag_result in lag_results]
+        U2_values = [lag_result['U2_value'] for lag_result in lag_results]
+        
+        print(f"Loading pair ({mod1}, {mod2}) with {num_lags} lags: {lag_values}")
+        
+        # Map lag values directly to time indices (ensure within [0, T-1] range)
+        lag_times = [min(lag, T - 1) for lag in lag_values]
+        
+        # Helper function for interpolation
+        def interpolate_values(values):
+            if len(lag_times) == 1:
+                return torch.full((T,), values[0])
+            else:
+                full_times = torch.arange(T, dtype=torch.float32)
+                return torch.from_numpy(np.interp(full_times.numpy(), lag_times, values))
+        
+        # Interpolate R, S, U1, U2 values
+        R_interp = interpolate_values(R_values)
+        S_interp = interpolate_values(S_values)
+        U1_interp = interpolate_values(U1_values)
+        U2_interp = interpolate_values(U2_values)
+        
+        # Store interpolated values
+        R[m1_idx, m2_idx, :] = R_interp
+        R[m2_idx, m1_idx, :] = R_interp
+        S[m1_idx, m2_idx, :] = S_interp
+        S[m2_idx, m1_idx, :] = S_interp
+        
+        # For uniqueness, take maximum across all pairs (modality can appear in multiple pairs)
+        U[m1_idx, :] = torch.maximum(U[m1_idx, :], U1_interp)
+        U[m2_idx, :] = torch.maximum(U[m2_idx, :], U2_interp)
         
         pairs_loaded += 1
     
+    print(f"RUS data loading complete:")
+    print(f"  RUS tensor shapes: U={U.shape}, R={R.shape}, S={S.shape}")
+    print(f"  Average R value: {R.mean().item():.4f}")
+    print(f"  Average S value: {S.mean().item():.4f}")
+    print(f"  Average U value: {U.mean().item():.4f}")
+    print(f"  Pairs loaded: {pairs_loaded}, Skipped (not found): {pairs_skipped_not_found}, Skipped (same): {pairs_skipped_same_modality}")
+ 
     return {'U': U, 'R': R, 'S': S}
 
 
@@ -112,8 +143,6 @@ def train_epoch_multimodal(model, dataloader, rus_data, optimizer, task_criterio
         optimizer.zero_grad()
 
         # Forward pass
-        seq_len = modality_data[0].shape[1]
-        rus_values = extend_rus_with_sequence_length(rus_values, seq_len)
         final_logits, all_aux_moe_outputs = model(modality_data, rus_values)
 
         # Calculate Task Loss
@@ -240,8 +269,6 @@ def eval_epoch_multimodal(model, dataloader, rus_data, task_criterion, device, a
             labels = labels.squeeze(-1).to(device)
 
             # Forward pass
-            seq_len = modality_data[0].shape[1]
-            rus_values = extend_rus_with_sequence_length(rus_values, seq_len)
             final_logits, _ = model(modality_data, rus_values)
 
             # Calculate Task Loss
@@ -329,7 +356,7 @@ def main(args):
 
     print(f"Loading data...")
     modality_names = ['vision', 'audio', 'text']
-    rus_data = load_mosimosei_rus_data(args.rus_data_path, modality_names)
+    rus_data = load_mosimosei_rus_data(args.rus_data_path, modality_names, args.seq_len)
     train_loader, val_loader, _ = get_dataloader(args.dataset_path, data_type=args.dataset, max_pad=True, task='classification', max_seq_len=args.seq_len, batch_size=args.batch_size)
 
     
@@ -464,7 +491,6 @@ def main(args):
 
                 plot_iter = iter(plot_loader)
                 batch_modalities, batch_masks, batch_rus, batch_labels = next(plot_iter)
-                batch_rus = extend_rus_with_sequence_length(batch_rus, batch_modalities[0].shape[1])
                 # Move to device (same as training/validation loops)
                 batch_modalities = [mod.to(device) for mod in batch_modalities]
                 batch_rus = {k: v.to(device) for k, v in batch_rus.items()}
@@ -503,9 +529,6 @@ if __name__ == "__main__":
     parser.add_argument('--rus_data_path', type=str, required=True, help='Path to the RUS data')
     parser.add_argument('--dataset', type=str, required=True, help='Dataset to train on')
     parser.add_argument('--seq_len', type=int, default=50, help='Sequence length')
-    parser.add_argument('--truncate_from_end', action='store_true', 
-                       help='Truncate sequences from the end (keep first timesteps). Default is to keep last timesteps.')
-    # parser.add_argument('--rus_max_lag', type=int, default=10, help='Max lag used in RUS data')
 
     # Model architecture args
     parser.add_argument('--d_model', type=int, default=32, help='Model dimension')

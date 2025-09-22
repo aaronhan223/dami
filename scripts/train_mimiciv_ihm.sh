@@ -49,9 +49,10 @@ echo ""
 python ../src/train_mimiciv_multimodal.py \
     --train_data_path ../../mimic-iv-preprocess/data/ihm/train_ihm-48-cxr-notes-missingInd-standardized_stays.pkl \
     --val_data_path ../../mimic-iv-preprocess/data/ihm/val_ihm-48-cxr-notes-missingInd-standardized_stays.pkl \
-    --rus_data_path ../results/mimiciv/ihm/rus_multimodal_all_meanpool.npy \
+    --rus_data_path ../results/mimiciv/ihm/rus_multimodal_all_seq48_lags8_meanpool.npy \
     --task ihm \
     --truncate_from_end \
+    --seq_len 48 \
     --gpu $GPU \
     --use_wandb \
     --wandb_project mimiciv-multimodal-trus-moe \
