@@ -179,8 +179,8 @@ if __name__ == "__main__":
                         help='Directory to save analysis results')
     parser.add_argument('--processed_dataset_dir', type=str, required=True,
                         help='Root directory of the processed WESAD datasets')
-    parser.add_argument('--seq_len', type=int, default=100,
-                        help='Length of sequences for lag computation. If None, inferred from data')
+    # parser.add_argument('--seq_len', type=int, default=100,
+    #                     help='Length of sequences for lag computation. If None, inferred from data')
     parser.add_argument('--max_lag', type=int, default=10,
                         help='Number of lags to compute, evenly distributed across the sequence')
     parser.add_argument('--bins', type=int, default=4,
