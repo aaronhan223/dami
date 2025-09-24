@@ -1,4 +1,5 @@
 #! /bin/bash
+# Best found: lambda_rus = 2.0, lambda_load = 0.08
 
 # Check if correct number of arguments provided
 if [ $# -ne 2 ]; then
@@ -20,4 +21,7 @@ python ../src/test_wesad_multimodal.py \
     --rus_data_path ../results/wesad/rus_multimodal_all_lag10.npy \
     --gpu $GPU \
     --eval_train \
-    --eval_val
+    --eval_val \
+    --plot_expert_activations \
+    --plot_num_samples 1024 \
+    --save_metrics
