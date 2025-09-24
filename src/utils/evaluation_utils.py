@@ -4,6 +4,7 @@ Evaluation utility functions for model testing and visualization.
 
 import os
 from typing import Dict, List
+import json
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import roc_curve
@@ -103,3 +104,35 @@ def save_evaluation_plots(results: Dict, output_dir: str, dataset_name: str, cla
         plt.close()
     
     print(f"Evaluation plots saved to {output_dir}")
+
+
+def save_evaluation_metrics(results: Dict, output_dir: str, dataset_name: str):
+    """
+    Save evaluation metrics to a JSON file.
+    The file will be named "{dataset_name.lower()}_metrics.json" and placed in output_dir.
+
+    Args:
+        results: Dictionary containing evaluation metrics and data
+        output_dir: Directory to save the metrics file
+        dataset_name: Name of the dataset for the file name and payload
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    payload = {
+        'dataset': dataset_name,
+        'accuracy': float(results['accuracy']),
+        'precision': float(results['precision']),
+        'recall': float(results['recall']),
+        'f1_score': float(results['f1_score']),
+        'auc_score': float(results['auc_score']),
+        'avg_loss': float(results['avg_loss']),
+        'per_class_precision': [float(x) for x in results['per_class_precision']],
+        'per_class_recall': [float(x) for x in results['per_class_recall']],
+        'per_class_f1': [float(x) for x in results['per_class_f1']],
+        'confusion_matrix': results['confusion_matrix'].tolist()
+    }
+
+    out_path = os.path.join(output_dir, f"{dataset_name.lower()}_metrics.json")
+    with open(out_path, 'w') as f:
+        json.dump(payload, f, indent=2)
+    print(f"Evaluation metrics saved to {out_path}")

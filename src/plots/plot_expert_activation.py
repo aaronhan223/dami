@@ -7,13 +7,13 @@ from typing import Dict, List, Tuple, Optional
 import os
 from tqdm import tqdm
 
-def calculate_expert_activation_ratios_trus(
+def calculate_expert_activation_ratios_time_moe(
     expert_indices: torch.Tensor,
     num_experts: int,
     modality_names: Optional[List[str]] = None
 ) -> np.ndarray:
     """
-    Calculate the activation ratio for each expert per modality for TRUS model.
+    Calculate the activation ratio for each expert per modality for TIME-MoE model.
     
     Args:
         expert_indices: Tensor of shape (B, M, T, k) containing top-k expert indices
@@ -48,64 +48,198 @@ def calculate_expert_activation_ratios_trus(
     return activation_ratios
 
 
+# def plot_expert_activation_histogram(
+#     activation_ratios: np.ndarray,
+#     modality_names: List[str],
+#     layer_name: str,
+#     model_type: str,
+#     save_path: Optional[str] = None,
+#     figsize: Tuple[int, int] = (12, 8)
+# ):
+#     """
+#     Plot a histogram showing activation ratios for each expert.
+    
+#     Args:
+#         activation_ratios: Array of shape (num_experts, num_modalities) with activation percentages
+#         modality_names: List of modality names
+#         layer_name: Name of the MoE layer
+#         model_type: "TIME-MoE" or "Baseline"
+#         save_path: Optional path to save the figure
+#         figsize: Figure size
+#     """
+#     num_experts, num_modalities = activation_ratios.shape
+    
+#     # Create figure and axis
+#     fig, ax = plt.subplots(figsize=figsize)
+    
+#     # Set up bar positions
+#     x = np.arange(num_experts)
+#     width = 0.8 / num_modalities
+    
+#     # Create color palette
+#     colors = sns.color_palette("husl", num_modalities)
+    
+#     # Plot bars for each modality
+#     for i, modality in enumerate(modality_names):
+#         offset = (i - num_modalities / 2) * width + width / 2
+#         bars = ax.bar(x + offset, activation_ratios[:, i], width, 
+#                       label=modality, color=colors[i], alpha=0.8)
+        
+#         # Add value labels on bars if they're significant
+#         # Original code:
+#         for bar in bars:
+#             height = bar.get_height()
+#             if height > 1:  # Only show labels for bars > 1%
+#                 ax.text(bar.get_x() + bar.get_width()/2., height,
+#                        f'{height:.1f}', ha='center', va='bottom', fontsize=22) # fontsize=8)
+        
+#         # New code with improved font sizing and overlap prevention (commented out):
+#         # # Store label positions to avoid overlaps
+#         # label_positions = []
+#         # 
+#         # for j, bar in enumerate(bars):
+#         #     height = bar.get_height()
+#         #     if height > 1:  # Only show labels for bars > 1%
+#         #         # Calculate available space for the label
+#         #         bar_width = bar.get_width()
+#         #         bar_center_x = bar.get_x() + bar_width/2.
+#         #         
+#         #         # Use larger font size but adjust positioning to avoid overlaps
+#         #         fontsize = 12  # Reduced from 14 to help with spacing
+#         #         
+#         #         # For bars that are too narrow or too short, use smaller font
+#         #         if bar_width < 0.15:  # Very narrow bars
+#         #             fontsize = 10
+#         #         elif height < 3:  # Very short bars
+#         #             fontsize = 10
+#         #         
+#         #         # Calculate initial text position
+#         #         base_text_y = height + 1.0  # Increased offset
+#         #         text_y = base_text_y
+#         #         
+#         #         # Check for overlaps with existing labels and adjust vertically
+#         #         min_separation = 3.0  # Minimum vertical separation between labels
+#         #         for prev_x, prev_y in label_positions:
+#         #             # If labels are horizontally close, stack them vertically
+#         #             if abs(bar_center_x - prev_x) < bar_width * 2:  # Horizontally close
+#         #                 if abs(text_y - prev_y) < min_separation:
+#         #                     text_y = max(text_y, prev_y + min_separation)
+#         #         
+#         #         # Add rotation for very crowded areas or when stacked high
+#         #         rotation = 0
+#         #         if bar_width < 0.1 or text_y > height + 8:  # Very crowded or stacked high
+#         #             rotation = 45
+#         #             fontsize = min(fontsize, 10)  # Use smaller font when rotated
+#         #         
+#         #         # Store this label's position
+#         #         label_positions.append((bar_center_x, text_y))
+#         #         
+#         #         ax.text(bar_center_x, text_y,
+#         #                f'{height:.1f}', ha='center', va='bottom', 
+#         #                fontsize=fontsize, rotation=rotation, 
+#         #                fontweight='bold', color='black')
+    
+#     # Customize the plot
+#     ax.set_xlabel('Expert Index', fontsize=25)
+#     ax.set_ylabel('Activation Ratio (%)', fontsize=25)
+#     ax.set_title(f'{model_type} Model - {layer_name} Expert Activation Ratios', fontsize=25)
+#     ax.set_xticks(x)
+#     ax.set_xticklabels([f'{i}' for i in range(num_experts)])
+#     ax.legend(title='Modality', loc='upper right', fontsize=20, title_fontsize=22) # bbox_to_anchor=(1.05, 1), loc='upper left')
+#     # ax.grid(True, alpha=0.3, axis='y')
+    
+#     # Set y-axis limit with extra space for text labels
+#     max_value = activation_ratios.max()
+#     ax.set_ylim(0, max(100, max_value * 1.1))  # Extra 10% space for labels
+#     # Set font sizes for ticks
+#     ax.tick_params(axis='x', labelsize=20)
+#     ax.tick_params(axis='y', labelsize=20)
+#     plt.tight_layout()
+    
+#     if save_path:
+#         plt.savefig(save_path, dpi=300, bbox_inches='tight')
+#         print(f"Figure saved to {save_path}")
+    
+#     plt.show()
+
+from adjustText import adjust_text
+
 def plot_expert_activation_histogram(
     activation_ratios: np.ndarray,
     modality_names: List[str],
     layer_name: str,
     model_type: str,
     save_path: Optional[str] = None,
-    figsize: Tuple[int, int] = (12, 8)
+    figsize: Tuple[int, int] = (12, 8),
+    moe_num_synergy_experts: Optional[int] = None
 ):
-    """
-    Plot a histogram showing activation ratios for each expert.
-    
-    Args:
-        activation_ratios: Array of shape (num_experts, num_modalities) with activation percentages
-        modality_names: List of modality names
-        layer_name: Name of the MoE layer
-        model_type: "TRUS" or "Baseline"
-        save_path: Optional path to save the figure
-        figsize: Figure size
-    """
     num_experts, num_modalities = activation_ratios.shape
     
-    # Create figure and axis
     fig, ax = plt.subplots(figsize=figsize)
     
-    # Set up bar positions
     x = np.arange(num_experts)
     width = 0.8 / num_modalities
     
-    # Create color palette
     colors = sns.color_palette("husl", num_modalities)
     
-    # Plot bars for each modality
+    all_texts = []  # collect all labels for adjustText
+    
     for i, modality in enumerate(modality_names):
         offset = (i - num_modalities / 2) * width + width / 2
         bars = ax.bar(x + offset, activation_ratios[:, i], width, 
                       label=modality, color=colors[i], alpha=0.8)
         
-        # Add value labels on bars if they're significant
-        for bar in bars:
+        # Collect text labels for adjustText
+        for j, bar in enumerate(bars):
             height = bar.get_height()
             if height > 1:  # Only show labels for bars > 1%
-                ax.text(bar.get_x() + bar.get_width()/2., height,
-                       f'{height:.1f}', ha='center', va='bottom', fontsize=8)
+                text = ax.text(
+                    bar.get_x() + bar.get_width()/2.,  # x pos
+                    height + 1.0,                      # y pos with small offset
+                    f'{height:.1f}', ha='center', va='bottom',
+                    fontsize=20, color='black'
+                )
+                all_texts.append(text)
     
+     # Adjust text positions to avoid overlaps
+    adjust_text(all_texts,
+                ax=ax,
+                only_move={'points':'y', 'texts':'y'},
+                force_points=0.05,
+                force_text=0.05,
+                expand_points=(1.0, 1.4),
+                expand_text=(1.0, 1.4)
+                # arrowprops=dict(arrowstyle='-', color='black', lw=0.5)
+                )
+     
+    # Highlight synergy experts if specified
+    if moe_num_synergy_experts is not None and moe_num_synergy_experts > 0:
+        # Get current x-tick labels and modify synergy expert labels
+        current_labels = [f'{i}' for i in range(num_experts)]
+        for expert_idx in range(min(moe_num_synergy_experts, num_experts)):
+            current_labels[expert_idx] = f'{expert_idx}'
+        
+        # Set the modified labels with color highlighting
+        ax.set_xticklabels(current_labels)
+        
+        # Color the synergy expert tick labels red
+        for expert_idx in range(min(moe_num_synergy_experts, num_experts)):
+            ax.get_xticklabels()[expert_idx].set_color('red')
+            ax.get_xticklabels()[expert_idx].set_fontweight('bold')
+
     # Customize the plot
-    ax.set_xlabel('Expert Index', fontsize=24)
-    ax.set_ylabel('Activation Ratio (%)', fontsize=24)
-    ax.set_title(f'{model_type} Model - {layer_name} Expert Activation Ratios', fontsize=28)
+    ax.set_xlabel('Expert Index', fontsize=25)
+    ax.set_ylabel('Activation Ratio (%)', fontsize=25)
+    ax.set_title(f'{model_type} Model - {layer_name} Expert Activation Ratios', fontsize=25)
     ax.set_xticks(x)
     ax.set_xticklabels([f'{i}' for i in range(num_experts)])
-    ax.legend(title='Modality', bbox_to_anchor=(1.05, 1), loc='upper left')
-    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(title='Modality', loc='upper right', fontsize=20, title_fontsize=22)
     
-    # Set y-axis limit
-    ax.set_ylim(0, max(100, activation_ratios.max() * 1.1))
-    # Set font sizes for ticks
+    max_value = activation_ratios.max()
+    ax.set_ylim(0, max(100, max_value * 1.4))
     ax.tick_params(axis='x', labelsize=20)
     ax.tick_params(axis='y', labelsize=20)
+    
     plt.tight_layout()
     
     if save_path:
@@ -115,18 +249,20 @@ def plot_expert_activation_histogram(
     plt.show()
 
 
-def plot_all_moe_layers_trus(
+
+def plot_all_moe_layers_time_moe(
     model: nn.Module,
     data_batch,
     rus_values: Dict[str, torch.Tensor],
     modality_names: Optional[List[str]] = None,
-    save_dir: Optional[str] = None
+    save_dir: Optional[str] = None,
+    moe_num_synergy_experts: Optional[int] = None
 ):
     """
-    Plot activation histograms for all MoE layers in a TRUS model.
+    Plot activation histograms for all MoE layers in a TIME-MoE model.
     
     Args:
-        model: The TRUS MoE model
+        model: The TIME-MoE MoE model
         data_batch: Input data batch - can be either:
                    - Single tensor of shape (B, M, T, E)
                    - List of tensors [tensor1, tensor2, ...] where each tensor is (B, T, E_i)
@@ -171,31 +307,33 @@ def plot_all_moe_layers_trus(
                 moe_layer_count += 1
         
         # Calculate activation ratios
-        activation_ratios = calculate_expert_activation_ratios_trus(
+        activation_ratios = calculate_expert_activation_ratios_time_moe(
             expert_indices, num_experts, modality_names
         )
         
         # Plot histogram
         layer_name = f"MoE Layer {layer_idx + 1}"
-        save_path = os.path.join(save_dir, f"trus_moe_layer_{layer_idx + 1}.png") if save_dir else None
+        save_path = os.path.join(save_dir, f"time_moe_layer_{layer_idx + 1}.pdf") if save_dir else None
         
         plot_expert_activation_histogram(
             activation_ratios,
             modality_names,
             layer_name,
-            "TRUS",
-            save_path
+            "TIME-MoE",
+            save_path,
+            moe_num_synergy_experts=moe_num_synergy_experts
         )
         
         # Plot stacked activation plot
-        stacked_save_path = os.path.join(save_dir, f"trus_moe_layer_{layer_idx + 1}_stacked.png") if save_dir else None
+        stacked_save_path = os.path.join(save_dir, f"time_moe_layer_{layer_idx + 1}_stacked.pdf") if save_dir else None
         
         create_stacked_activation_plot(
             activation_ratios,
             modality_names,
             layer_name,
-            "TRUS",
-            stacked_save_path
+            "TIME-MoE",
+            stacked_save_path,
+            moe_num_synergy_experts=moe_num_synergy_experts
         )
 
 
@@ -203,7 +341,8 @@ def plot_all_moe_layers_baseline(
     model: nn.Module,
     data_batch,
     modality_names: Optional[List[str]] = None,
-    save_dir: Optional[str] = None
+    save_dir: Optional[str] = None,
+    moe_num_synergy_experts: Optional[int] = None
 ):
     """
     Plot activation histograms for all MoE layers in a baseline model.
@@ -255,31 +394,33 @@ def plot_all_moe_layers_baseline(
                 moe_layer_count += 1
         
         # Calculate activation ratios
-        activation_ratios = calculate_expert_activation_ratios_trus(
+        activation_ratios = calculate_expert_activation_ratios_time_moe(
             expert_indices, num_experts, modality_names
         )
         
         # Plot histogram
         layer_name = f"MoE Layer {layer_idx + 1}"
-        save_path = os.path.join(save_dir, f"baseline_moe_layer_{layer_idx + 1}.png") if save_dir else None
+        save_path = os.path.join(save_dir, f"baseline_moe_layer_{layer_idx + 1}.pdf") if save_dir else None
         
         plot_expert_activation_histogram(
             activation_ratios,
             modality_names,
             layer_name,
             "Baseline",
-            save_path
+            save_path,
+            moe_num_synergy_experts=moe_num_synergy_experts
         )
         
         # Plot stacked activation plot
-        stacked_save_path = os.path.join(save_dir, f"baseline_moe_layer_{layer_idx + 1}_stacked.png") if save_dir else None
+        stacked_save_path = os.path.join(save_dir, f"baseline_moe_layer_{layer_idx + 1}_stacked.pdf") if save_dir else None
         
         create_stacked_activation_plot(
             activation_ratios,
             modality_names,
             layer_name,
             "Baseline",
-            stacked_save_path
+            stacked_save_path,
+            moe_num_synergy_experts=moe_num_synergy_experts
         )
 
 
@@ -289,7 +430,8 @@ def create_stacked_activation_plot(
     layer_name: str,
     model_type: str,
     save_path: Optional[str] = None,
-    figsize: Tuple[int, int] = (10, 6)
+    figsize: Tuple[int, int] = (10, 6),
+    moe_num_synergy_experts: Optional[int] = None
 ):
     """
     Create a stacked bar plot showing the composition of each expert's activations.
@@ -298,7 +440,7 @@ def create_stacked_activation_plot(
         activation_ratios: Array of shape (num_experts, num_modalities) with activation percentages
         modality_names: List of modality names
         layer_name: Name of the MoE layer
-        model_type: "TRUS" or "Baseline"
+        model_type: "TIME-MoE" or "Baseline"
         save_path: Optional path to save the figure
         figsize: Figure size
     """
@@ -324,15 +466,30 @@ def create_stacked_activation_plot(
                label=modality, color=colors[i], alpha=0.8)
         bottom += normalized_ratios[:, i]
     
+    # Highlight synergy experts if specified
+    if moe_num_synergy_experts is not None and moe_num_synergy_experts > 0:
+        # Get current x-tick labels and modify synergy expert labels
+        current_labels = [f'{i}' for i in range(num_experts)]
+        for expert_idx in range(min(moe_num_synergy_experts, num_experts)):
+            current_labels[expert_idx] = f'{expert_idx}'
+        
+        # Set the modified labels with color highlighting
+        ax.set_xticklabels(current_labels)
+        
+        # Color the synergy expert tick labels red
+        for expert_idx in range(min(moe_num_synergy_experts, num_experts)):
+            ax.get_xticklabels()[expert_idx].set_color('red')
+            ax.get_xticklabels()[expert_idx].set_fontweight('bold')
+    
     # Customize the plot
-    ax.set_xlabel('Expert Index', fontsize=24)
-    ax.set_ylabel('Modality Composition (%)', fontsize=24)
-    ax.set_title(f'{model_type} Model - {layer_name} Expert Modality Composition', fontsize=28)
+    ax.set_xlabel('Expert Index', fontsize=25)
+    ax.set_ylabel('Modality Composition (%)', fontsize=25)
+    ax.set_title(f'{model_type} Model - {layer_name} Expert Modality Composition', fontsize=25)
     ax.set_xticks(x)
     ax.set_xticklabels([f'{i}' for i in range(num_experts)])
-    ax.legend(title='Modality', bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.legend(title='Modality', loc='upper right', fontsize=20, title_fontsize=22) # bbox_to_anchor=(1.05, 1), loc='upper left')
     ax.set_ylim(0, 100)
-    ax.grid(True, alpha=0.3, axis='y')
+    # ax.grid(True, alpha=0.3, axis='y')
     ax.tick_params(axis='x', labelsize=20)
     ax.tick_params(axis='y', labelsize=20)
     plt.tight_layout()
@@ -346,23 +503,24 @@ def create_stacked_activation_plot(
 
 # Example usage function
 def analyze_expert_activations(
-    trus_model: Optional[nn.Module] = None,
+    time_moe_model: Optional[nn.Module] = None,
     baseline_model: Optional[nn.Module] = None,
     data_batch = None,
     rus_values: Optional[Dict[str, torch.Tensor]] = None,
     modality_names: Optional[List[str]] = None,
-    save_dir: str = "../results/expert_activation_plots"
+    save_dir: str = "../results/expert_activation_plots",
+    moe_num_synergy_experts: Optional[int] = None
 ):
     """
-    Analyze and plot expert activations for both TRUS and baseline models.
+    Analyze and plot expert activations for both TIME-MoE and baseline models.
     
     Args:
-        trus_model: TRUS MoE model (optional)
+        time_moe_model: TIME-MoE model (optional)
         baseline_model: Baseline MoE model (optional)
         data_batch: Input data batch - can be either:
                    - Single tensor of shape (B, M, T, E)
                    - List of tensors [tensor1, tensor2, ...] where each tensor is (B, T, E_i)
-        rus_values: RUS values dictionary (required for TRUS model)
+        rus_values: RUS values dictionary (required for TIME-MoE model)
         modality_names: Optional list of modality names
         save_dir: Directory to save plots
     """
@@ -370,19 +528,19 @@ def analyze_expert_activations(
         print("Error: data_batch is required")
         return
     
-    if trus_model is not None:
+    if time_moe_model is not None:
         if rus_values is None:
-            print("Error: rus_values are required for TRUS model")
+            print("Error: rus_values are required for TIME-MoE model")
         else:
-            print("Analyzing TRUS model expert activations...")
-            trus_save_dir = os.path.join(save_dir, "trus")
-            plot_all_moe_layers_trus(trus_model, data_batch, rus_values, 
-                                   modality_names, trus_save_dir)
+            print("Analyzing TIME-MoE model expert activations...")
+            time_moe_save_dir = os.path.join(save_dir, "time_moe")
+            plot_all_moe_layers_time_moe(time_moe_model, data_batch, rus_values, 
+                                   modality_names, time_moe_save_dir, moe_num_synergy_experts)
     
     if baseline_model is not None:
         print("Analyzing baseline model expert activations...")
         baseline_save_dir = os.path.join(save_dir, "baseline")
         plot_all_moe_layers_baseline(baseline_model, data_batch, 
-                                   modality_names, baseline_save_dir)
+                                   modality_names, baseline_save_dir, moe_num_synergy_experts)
     
     print(f"Analysis complete. Plots saved to {save_dir}")

@@ -22,7 +22,7 @@ from sklearn.metrics import roc_auc_score
 from mimiciv_rus_multimodal import preprocess_mimiciv_data
 from trus_moe_multimodal import MultimodalTRUSMoEModel
 from trus_moe_model import calculate_rus_losses, calculate_load_balancing_loss
-from plot_expert_activation import analyze_expert_activations
+from plots.plot_expert_activation import analyze_expert_activations
 from utils.rus_utils import extend_rus_with_sequence_length
 
 
@@ -743,7 +743,7 @@ def main(args):
                 plot_loader = DataLoader(
                     val_dataset,
                     batch_size=args.plot_num_samples,
-                    shuffle=False,
+                    shuffle=True,
                     num_workers=0,
                     collate_fn=collate_multimodal
                 )

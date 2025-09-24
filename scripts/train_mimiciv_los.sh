@@ -1,14 +1,15 @@
 #! /bin/bash
-# Best found: lambda_rus = 1.0, lambda_load = 0.02
+# Best found: lambda_rus = 0.5, lambda_load = 0.02
 
 # Check if correct number of arguments provided
-if [ $# -ne 3 ]; then
-    echo "Usage: $0 <lambda_rus> <lambda_load> <gpu>"
+if [ $# -ne 4 ]; then
+    echo "Usage: $0 <lambda_rus> <lambda_load> <gpu> <seed>"
     echo "  lambda_rus: Value for lambda_u, lambda_r, and lambda_s (e.g., 0, 0.5, 1)"
     echo "  lambda_load: Value for lambda_load (e.g., 0.02, 0.05)"
     echo "  gpu: GPU device ID (e.g., 0, 1, 2)"
+    echo "  seed: Random seed (e.g., 42, 123, 456)"
     echo ""
-    echo "Example: $0 0.5 0.02 1"
+    echo "Example: $0 0.5 0.02 1 42"
     exit 1
 fi
 
@@ -16,6 +17,7 @@ fi
 LAMBDA_RUS=$1
 LAMBDA_LOAD=$2
 GPU=$3
+SEED=$4
 
 # Validate lambda_rus argument
 if [[ ! "$LAMBDA_RUS" =~ ^[0-9]*\.?[0-9]+$ ]]; then
@@ -35,13 +37,20 @@ if [[ ! "$GPU" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
+# Validate seed argument
+if [[ ! "$SEED" =~ ^[0-9]+$ ]]; then
+    echo "Error: seed must be a non-negative integer (got: $SEED)"
+    exit 1
+fi
+
 # Create run name with hyperparameters
-RUN_NAME="mimiciv_los_lambdarus${LAMBDA_RUS}_lambdaload${LAMBDA_LOAD}"
+RUN_NAME="mimiciv_los_lambdarus${LAMBDA_RUS}_lambdaload${LAMBDA_LOAD}_seed${SEED}"
 
 echo "Starting training with:"
 echo "  lambda_u = lambda_r = lambda_s = $LAMBDA_RUS"
 echo "  lambda_load = $LAMBDA_LOAD"
 echo "  gpu = $GPU"
+echo "  seed = $SEED"
 echo "  wandb_run_name = $RUN_NAME"
 echo ""
 
@@ -61,5 +70,6 @@ python ../src/train_mimiciv_multimodal.py \
     --lambda_s $LAMBDA_RUS \
     --lambda_load $LAMBDA_LOAD \
     --run_name $RUN_NAME \
+    --seed $SEED \
     --lr 1e-3 \
     --epochs 20
