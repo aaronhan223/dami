@@ -646,7 +646,7 @@ def main(args):
                 )
                 
                 plot_iter = iter(plot_loader)
-                batch_modalities, batch_masks, batch_rus, batch_labels = next(plot_iter)
+                batch_modalities, batch_rus, batch_labels = next(plot_iter)
                 # Move to device (same as training/validation loops)
                 batch_modalities = [mod.to(device) for mod in batch_modalities]
                 batch_rus = {k: v.to(device) for k, v in batch_rus.items()}

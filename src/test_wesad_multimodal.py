@@ -9,7 +9,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 from tqdm import tqdm
-
+from pathlib import Path
 # Import required modules
 from trus_moe_multimodal import MultimodalTRUSMoEModel
 from train_wesad_multimodal import (
@@ -19,7 +19,8 @@ from train_wesad_multimodal import (
 )
 from wesad_rus_multimodal import load_wesad_data
 from utils.checkpoint_utils import load_checkpoint, create_model_from_checkpoint
-from utils.evaluation_utils import print_evaluation_results, save_evaluation_plots
+from utils.evaluation_utils import print_evaluation_results, save_evaluation_plots, save_evaluation_metrics
+from plots.plot_expert_activation import analyze_expert_activations
 
 
 def evaluate_model(model: MultimodalTRUSMoEModel, 
@@ -146,12 +147,20 @@ def main():
                        help='Save evaluation plots')
     parser.add_argument('--save_predictions', action='store_true',
                        help='Save predictions to file')
+    parser.add_argument('--save_metrics', action='store_true',
+                       help='Save evaluation metrics to JSON files in the checkpoint directory')
     
     # Additional evaluation options
     parser.add_argument('--eval_train', action='store_true',
                        help='Also evaluate on training set')
     parser.add_argument('--eval_val', action='store_true',
                        help='Also evaluate on validation set')
+    
+    # Expert activation plotting args
+    parser.add_argument('--plot_expert_activations', action='store_true',
+                       help='Generate expert activation plots after testing')
+    parser.add_argument('--plot_num_samples', type=int, default=32,
+                       help='Number of samples to use for expert activation plotting')
     
     args = parser.parse_args()
     
@@ -164,7 +173,8 @@ def main():
         print("Using CPU")
     
     # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    # os.makedirs(args.output_dir, exist_ok=True)
+    args.output_dir = Path(args.checkpoint_path).parent
     
     # Load checkpoint
     model_state_dict, train_args, modality_configs, modality_names, best_val_acc = load_checkpoint(
@@ -219,10 +229,29 @@ def main():
     )
     
     print(f"Test dataset size: {len(test_dataset)}")
+
+    # Calculate no-skill baseline accuracy on the test set
+    print("Calculating no-skill baseline accuracy on the test set...")
+    test_labels = []
+    for _, _, labels in test_loader:
+        test_labels.extend(labels.numpy())
+    test_labels = np.array(test_labels)
+    if len(test_labels) > 0:
+        unique_lbls, counts = np.unique(test_labels, return_counts=True)
+        most_frequent_class = unique_lbls[np.argmax(counts)]
+        most_frequent_count = np.max(counts)
+        test_baseline_acc = (most_frequent_count / len(test_labels)) * 100
+        print(f"  Most frequent class (test): {class_idx_to_name.get(int(most_frequent_class), str(int(most_frequent_class)))} (class {int(most_frequent_class)})")
+        print(f"  Most frequent class count (test): {int(most_frequent_count)}")
+        print(f"  No-skill baseline accuracy (test): {test_baseline_acc:.2f}%")
+    else:
+        print("  Warning: No labels found in test loader to compute baseline accuracy.")
     
     # Evaluate on test set
     test_results = evaluate_model(model, test_loader, device, "Test")
     print_evaluation_results(test_results, "Test", class_names)
+    if args.save_metrics:
+        save_evaluation_metrics(test_results, str(args.output_dir), "Test")
     
     # Save test plots
     if args.save_plots:
@@ -259,6 +288,8 @@ def main():
         
         if args.save_plots:
             save_evaluation_plots(train_results, args.output_dir, "Train", class_names)
+        if args.save_metrics:
+            save_evaluation_metrics(train_results, str(args.output_dir), "Train")
     
     # Optional: Evaluate on validation set
     if args.eval_val:
@@ -282,6 +313,45 @@ def main():
         
         if args.save_plots:
             save_evaluation_plots(val_results, args.output_dir, "Validation", class_names)
+        if args.save_metrics:
+            save_evaluation_metrics(val_results, str(args.output_dir), "Validation")
+    
+    # Generate expert activation plots if requested
+    if args.plot_expert_activations:
+        print("\nGenerating expert activation plots for the test model...")
+        
+        # Create a temporary dataloader with the desired batch size for plotting
+        plot_loader = DataLoader(
+            test_dataset,
+            batch_size=args.plot_num_samples,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=True if device.type == "cuda" else False,
+            collate_fn=collate_multimodal
+        )
+        
+        plot_iter = iter(plot_loader)
+        batch_modalities, batch_rus, batch_labels = next(plot_iter)
+        # Move to device (same as evaluation loops)
+        batch_modalities = [mod.to(device) for mod in batch_modalities]
+        batch_rus = {k: v.to(device) for k, v in batch_rus.items()}
+        
+        # Generate plots
+        plot_save_dir = os.path.join(args.output_dir, 'expert_activation_plots_test')
+        
+        try:
+            analyze_expert_activations(
+                time_moe_model=model,
+                baseline_model=None,
+                data_batch=batch_modalities,
+                rus_values=batch_rus,
+                modality_names=modality_names,
+                save_dir=plot_save_dir,
+                moe_num_synergy_experts=train_args.moe_num_synergy_experts
+            )
+            print(f"Expert activation plots saved to {plot_save_dir}")
+        except Exception as e:
+            print(f"Error generating expert activation plots: {e}")
     
     # Summary
     print(f"\n{'='*60}")

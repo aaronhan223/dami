@@ -487,16 +487,20 @@ def main(args):
                 plot_model.eval()
                 
                 # Get a batch of validation data
-                plot_loader = get_dataloader(args.dataset_path, data_type=args.dataset, max_pad=True, task='classification', max_seq_len=args.seq_len, batch_size=args.plot_num_samples)
+                _, plot_val_loader, _ = get_dataloader(args.dataset_path, data_type=args.dataset, max_pad=True, task='classification', max_seq_len=args.seq_len, batch_size=args.plot_num_samples)
 
-                plot_iter = iter(plot_loader)
-                batch_modalities, batch_masks, batch_rus, batch_labels = next(plot_iter)
+                vision_b, audio_b, text_b, labels_b = next(iter(plot_val_loader))
                 # Move to device (same as training/validation loops)
-                batch_modalities = [mod.to(device) for mod in batch_modalities]
-                batch_rus = {k: v.to(device) for k, v in batch_rus.items()}
+                batch_size = vision_b.size(0)
+                batch_modalities = [vision_b.to(device), audio_b.to(device), text_b.to(device)]
+                batch_rus = {
+                    'U': torch.stack([rus_data['U'] for _ in range(batch_size)]).to(device),
+                    'R': torch.stack([rus_data['R'] for _ in range(batch_size)]).to(device),
+                    'S': torch.stack([rus_data['S'] for _ in range(batch_size)]).to(device)
+                }
                 
                 # Generate plots
-                plot_save_dir = os.path.join(args.output_dir, 'expert_activation_plots', args.run_name)
+                plot_save_dir = os.path.join(args.output_dir, 'checkpoints', args.run_name, 'expert_activation_plots')
 
                 try:
                     analyze_expert_activations(
@@ -534,7 +538,7 @@ if __name__ == "__main__":
     parser.add_argument('--d_model', type=int, default=32, help='Model dimension')
     parser.add_argument('--nhead', type=int, default=4, help='Number of attention heads')
     parser.add_argument('--d_ff', type=int, default=64, help='Feed-forward dimension')
-    parser.add_argument('--num_encoder_layers', type=int, default=6, help='Number of encoder layers')
+    parser.add_argument('--num_encoder_layers', type=int, default=2, help='Number of encoder layers') # 6, help='Number of encoder layers')
     parser.add_argument('--num_moe_layers', type=int, default=2, help='Number of MoE layers')
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
     parser.add_argument('--modality_encoder_layers', type=int, default=2, 
@@ -546,7 +550,7 @@ if __name__ == "__main__":
     parser.add_argument('--moe_num_experts', type=int, default=8, help='Number of experts per MoE layer')
     parser.add_argument('--moe_num_synergy_experts', type=int, default=2, help='Number of synergy experts')
     parser.add_argument('--moe_k', type=int, default=2, help='Top-k routing')
-    parser.add_argument('--moe_expert_hidden_dim', type=int, default=128, help='Expert hidden dimension')
+    parser.add_argument('--moe_expert_hidden_dim', type=int, default=64, help='Expert hidden dimension') # 64, help='Expert hidden dimension')
     parser.add_argument('--moe_capacity_factor', type=float, default=1.25, help='Expert capacity factor')
     parser.add_argument('--moe_drop_tokens', action='store_true', help='Drop tokens exceeding capacity')
     

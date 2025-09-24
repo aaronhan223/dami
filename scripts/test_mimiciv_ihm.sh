@@ -1,4 +1,5 @@
 #! /bin/bash
+# Best found: lambda_rus = 1.0, lambda_load = 0.02
 
 # Check if correct number of arguments provided
 if [ $# -ne 2 ]; then
@@ -20,4 +21,7 @@ python ../src/test_mimiciv_multimodal.py \
     --rus_data_path ../results/mimiciv/ihm/rus_multimodal_all_seq48_lags8_meanpool.npy \
     --gpu $GPU \
     --eval_train \
-    --eval_val
+    --eval_val \
+    --plot_expert_activations \
+    --plot_num_samples 1024 \
+    --save_metrics
