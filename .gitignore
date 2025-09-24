@@ -176,3 +176,4 @@ src/deprecated/
 scripts/wandb/
 src/docs/
 src/wandb/
+src/plots/analyze_mimiciv_rus.ipynb
