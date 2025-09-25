@@ -688,12 +688,14 @@ def main(args):
                     
                     # try:
                     analyze_expert_activations(
-                        trus_model=None,
+                        time_moe_model=None,
                         baseline_model=plot_model,
                         data_batch=batch_modalities,
                         rus_values=None,
                         modality_names=modality_names,
-                        save_dir=plot_save_dir
+                        save_dir=plot_save_dir,
+                        seed=args.seed,
+                        subject=args.subject_id
                     )
                     print(f"Expert activation plots saved to {plot_save_dir}")
                     # except Exception as e:

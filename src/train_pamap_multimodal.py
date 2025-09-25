@@ -22,7 +22,7 @@ try:
     from trus_moe_multimodal import MultimodalTRUSMoEModel
     from trus_moe_model import calculate_rus_losses, calculate_load_balancing_loss
     from pamap_rus import get_pamap_column_names, load_pamap_data, preprocess_pamap_data
-    from plots.plot_expert_activation import analyze_expert_activations
+    from plot_expert_activation import analyze_expert_activations
 except ImportError as e:
     print(f"Error importing project files: {e}")
     print("Please ensure trus_moe_multimodal.py, trus_moe_model.py, pamap_rus.py, and plot_expert_activation.py are accessible.")
@@ -884,7 +884,9 @@ def main(args):
                             data_batch=batch_modalities,
                             rus_values=batch_rus,
                             modality_names=modality_names,
-                            save_dir=plot_save_dir
+                            save_dir=plot_save_dir,
+                            seed=args.seed,
+                            subject=args.subject_id
                         )
                         print(f"Expert activation plots saved to {plot_save_dir}")
                     except Exception as e:

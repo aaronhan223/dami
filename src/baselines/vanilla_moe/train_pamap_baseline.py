@@ -664,7 +664,7 @@ def main(args):
                     
                     try:
                         analyze_expert_activations(
-                            trus_model=None,
+                            time_moe_model=None,
                             baseline_model=plot_model,
                             data_batch=val_batch_data,
                             rus_values=None,

@@ -342,7 +342,9 @@ def plot_all_moe_layers_baseline(
     data_batch,
     modality_names: Optional[List[str]] = None,
     save_dir: Optional[str] = None,
-    moe_num_synergy_experts: Optional[int] = None
+    moe_num_synergy_experts: Optional[int] = None,
+    seed: int = None,
+    subject: int = None
 ):
     """
     Plot activation histograms for all MoE layers in a baseline model.
@@ -400,7 +402,7 @@ def plot_all_moe_layers_baseline(
         
         # Plot histogram
         layer_name = f"MoE Layer {layer_idx + 1}"
-        save_path = os.path.join(save_dir, f"baseline_moe_layer_{layer_idx + 1}.pdf") if save_dir else None
+        save_path = os.path.join(save_dir, f"baseline_moe_layer_{layer_idx + 1}_seed{seed}_sub{subject}.pdf") if save_dir else None
         
         plot_expert_activation_histogram(
             activation_ratios,
@@ -412,7 +414,7 @@ def plot_all_moe_layers_baseline(
         )
         
         # Plot stacked activation plot
-        stacked_save_path = os.path.join(save_dir, f"baseline_moe_layer_{layer_idx + 1}_stacked.pdf") if save_dir else None
+        stacked_save_path = os.path.join(save_dir, f"baseline_moe_layer_{layer_idx + 1}_seed{seed}_sub{subject}_stacked.pdf") if save_dir else None
         
         create_stacked_activation_plot(
             activation_ratios,
@@ -487,11 +489,11 @@ def create_stacked_activation_plot(
     ax.set_title(f'{model_type} Model - {layer_name} Expert Modality Composition', fontsize=25)
     ax.set_xticks(x)
     ax.set_xticklabels([f'{i}' for i in range(num_experts)])
-    ax.legend(title='Modality', loc='upper right', fontsize=20, title_fontsize=22) # bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.legend(title='Modality', loc='upper right', fontsize=24, title_fontsize=25) # bbox_to_anchor=(1.05, 1), loc='upper left')
     ax.set_ylim(0, 100)
     # ax.grid(True, alpha=0.3, axis='y')
-    ax.tick_params(axis='x', labelsize=20)
-    ax.tick_params(axis='y', labelsize=20)
+    ax.tick_params(axis='x', labelsize=22)
+    ax.tick_params(axis='y', labelsize=22)
     plt.tight_layout()
     
     if save_path:
@@ -509,7 +511,9 @@ def analyze_expert_activations(
     rus_values: Optional[Dict[str, torch.Tensor]] = None,
     modality_names: Optional[List[str]] = None,
     save_dir: str = "../results/expert_activation_plots",
-    moe_num_synergy_experts: Optional[int] = None
+    moe_num_synergy_experts: Optional[int] = None,
+    seed: int = None,
+    subject: int = None
 ):
     """
     Analyze and plot expert activations for both TIME-MoE and baseline models.
@@ -541,6 +545,7 @@ def analyze_expert_activations(
         print("Analyzing baseline model expert activations...")
         baseline_save_dir = os.path.join(save_dir, "baseline")
         plot_all_moe_layers_baseline(baseline_model, data_batch, 
-                                   modality_names, baseline_save_dir, moe_num_synergy_experts)
+                                   modality_names, baseline_save_dir, moe_num_synergy_experts,
+                                   seed, subject)
     
     print(f"Analysis complete. Plots saved to {save_dir}")
